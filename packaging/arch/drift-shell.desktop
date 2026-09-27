@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Drift Shell (experimental)
+Name[ru]=Drift Shell (экспериментальная)
+Comment=Experimental tiling and infinite-canvas shell
+Exec=/usr/bin/drift-shell-session
+Type=Application
+DesktopNames=drift-shell;

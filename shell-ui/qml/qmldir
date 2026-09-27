@@ -1,0 +1,8 @@
+module DriftShell
+singleton Theme 1.0 Theme.qml
+Surface 1.0 Surface.qml
+ShellButton 1.0 ShellButton.qml
+ShellField 1.0 ShellField.qml
+Stars 1.0 Stars.qml
+Desktop 1.0 Desktop.qml
+SettingsView 1.0 SettingsView.qml

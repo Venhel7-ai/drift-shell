@@ -1,0 +1,16 @@
+[Unit]
+Description=driftwm, a trackpad-first infinite canvas Wayland compositor
+BindsTo=graphical-session.target
+Before=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+
+Wants=xdg-desktop-autostart.target
+Before=xdg-desktop-autostart.target
+
+[Service]
+Slice=session.slice
+Type=notify
+NotifyAccess=main
+UnsetEnvironment=WAYLAND_DISPLAY DISPLAY WAYLAND_SOCKET
+ExecStart=driftwm --backend udev

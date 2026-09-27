@@ -1,0 +1,45 @@
+autostart = ["/usr/bin/drift-shell-start"]
+
+[input.keyboard]
+layout = "us,ru"
+options = "grp:caps_toggle"
+
+[background]
+type = "none"
+
+[decorations]
+font = "Inter"
+font_size = 11
+font_weight = "medium"
+title_bar_height = 29
+corner_radius = 10
+border_width = 1
+border_color = "#ffffff13"
+border_color_focused = "#ffffff38"
+blur = false
+opacity = 1.0
+opacity_focused = 1.0
+
+[keybindings]
+"super+space" = "spawn /usr/bin/drift-shell-ctl search-toggle"
+"super+shift+space" = "spawn /usr/bin/drift-shell-ctl anchor"
+"super+r" = "spawn /usr/bin/drift-shell-ctl right"
+"super+shift+r" = "spawn /usr/bin/drift-shell-ctl pin"
+"super+d" = "spawn /usr/bin/drift-shell-ctl dock"
+"super+f" = "spawn /usr/bin/drift-shell-ctl focus"
+"super+n" = "spawn /usr/bin/drift-shell-ctl notifications"
+"super+comma" = "spawn /usr/bin/drift-shell-ctl settings"
+"super+l" = "spawn /usr/bin/drift-shell-lock"
+"super+ctrl+shift+r" = "spawn /usr/bin/drift-shell-safe"
+"super+return" = "spawn /usr/bin/foot"
+"super+shift+q" = "close-window"
+"super+ctrl+shift+q" = "quit"
+"super+1" = "spawn /usr/bin/drift-shell-ctl zone 1"
+"super+2" = "spawn /usr/bin/drift-shell-ctl zone 2"
+"super+3" = "spawn /usr/bin/drift-shell-ctl zone 3"
+"super+4" = "spawn /usr/bin/drift-shell-ctl zone 4"
+"super+5" = "spawn /usr/bin/drift-shell-ctl zone 5"
+"super+6" = "spawn /usr/bin/drift-shell-ctl zone 6"
+"super+7" = "spawn /usr/bin/drift-shell-ctl zone 7"
+"super+8" = "spawn /usr/bin/drift-shell-ctl zone 8"
+"super+9" = "spawn /usr/bin/drift-shell-ctl zone 9"

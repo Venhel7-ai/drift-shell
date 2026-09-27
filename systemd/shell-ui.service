@@ -1,0 +1,13 @@
+[Unit]
+Description=Drift Shell Quickshell interface
+After=shell-core.service
+Wants=shell-core.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/quickshell -p /usr/share/drift-shell/shell-ui/shell.qml
+Restart=on-failure
+RestartSec=2
+UMask=0077

@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH="/usr/share/drift-shell/shell-core:/usr/share/drift-shell/vendor"
+exec /usr/bin/python -m drift_shell "$@"

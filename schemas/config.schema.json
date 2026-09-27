@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Drift Shell 0.1 configuration (subset of V3)",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "profile": {
+      "default": "work",
+      "title": "Профиль",
+      "x-ui-level": 0,
+      "x-ui-group": "Внешний вид",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "string",
+      "enum": [
+        "work",
+        "reference",
+        "focus-presentation",
+        "minimal",
+        "showcase"
+      ]
+    },
+    "innerGap": {
+      "default": 12,
+      "title": "Расстояние между окнами",
+      "x-ui-level": 1,
+      "x-ui-group": "Окна",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 48
+    },
+    "outerGap": {
+      "default": 12,
+      "title": "Внешний отступ",
+      "x-ui-level": 1,
+      "x-ui-group": "Окна",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "masterRatio": {
+      "default": 0.58,
+      "title": "Доля главного окна",
+      "x-ui-level": 1,
+      "x-ui-group": "Окна",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "number",
+      "minimum": 0.15,
+      "maximum": 0.85
+    },
+    "layout": {
+      "default": "master",
+      "title": "Раскладка",
+      "x-ui-level": 0,
+      "x-ui-group": "Окна",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "string",
+      "enum": [
+        "master",
+        "grid",
+        "columns",
+        "rows",
+        "monocle"
+      ]
+    },
+    "rightWidth": {
+      "default": 290,
+      "title": "Ширина правой панели",
+      "x-ui-level": 1,
+      "x-ui-group": "Панели",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "integer",
+      "minimum": 240,
+      "maximum": 480
+    },
+    "dockReserve": {
+      "default": false,
+      "title": "Резервировать место дока",
+      "x-ui-level": 1,
+      "x-ui-group": "Панели",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "boolean"
+    },
+    "reducedMotion": {
+      "default": false,
+      "title": "Уменьшить анимацию",
+      "x-ui-level": 0,
+      "x-ui-group": "Анимации",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "boolean"
+    },
+    "historyLimit": {
+      "default": 200,
+      "title": "Размер истории уведомлений",
+      "x-ui-level": 1,
+      "x-ui-group": "Уведомления",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "criticalBypass": {
+      "default": true,
+      "title": "Критические уведомления при Не беспокоить",
+      "x-ui-level": 0,
+      "x-ui-group": "Уведомления",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "boolean"
+    },
+    "showDate": {
+      "default": false,
+      "title": "Дата рядом с часами",
+      "x-ui-level": 0,
+      "x-ui-group": "Панели",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "boolean"
+    },
+    "graphPolicy": {
+      "default": "ExpandedOnly",
+      "title": "Графики показателей",
+      "x-ui-level": 1,
+      "x-ui-group": "Панели",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "string",
+      "enum": [
+        "Off",
+        "OnHover",
+        "ExpandedOnly",
+        "Always"
+      ]
+    },
+    "starCount": {
+      "default": 38,
+      "title": "Количество звёзд",
+      "x-ui-level": 1,
+      "x-ui-group": "Внешний вид",
+      "x-risk-level": "safe",
+      "x-restart-required": false,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    }
+  },
+  "required": [
+    "schemaVersion"
+  ],
+  "additionalProperties": true
+}

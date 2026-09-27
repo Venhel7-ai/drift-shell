@@ -1,0 +1,28 @@
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Rust build output
+target/
+
+# Arch package build output
+/pkg/
+/src/
+*.pkg.tar.*
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem

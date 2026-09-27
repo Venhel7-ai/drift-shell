@@ -1,0 +1,1246 @@
+﻿ARCH DRIFTWM SHELL — VISUAL / UX SPECIFICATION V3
+Чистая нормативная визуальная спецификация без устаревших V2 defaults
+Reference viewport: 1672×941
+Default profile: WORK
+
+======================================================================
+1. ЦЕЛЬ
+======================================================================
+
+Интерфейс создаётся для многочасовой работы с кодом, терминалами, браузером, серверами и tiling-окнами.
+Красота достигается не количеством панелей, а:
+- качественной геометрией;
+- точной типографикой;
+- едиными материалами;
+- умеренной прозрачностью;
+- стабильными отступами;
+- короткой анимацией;
+- правильным использованием пустого пространства.
+
+Главный принцип: shell присутствует только тогда, когда она полезна.
+
+======================================================================
+2. ЦВЕТА
+======================================================================
+
+Black 0: #000000
+Black work: #050607
+Shell glass base: rgba(8,10,11,0.82)
+Overlay glass base: rgba(8,10,11,0.88)
+
+Text primary: rgba(255,255,255,0.92)
+Text secondary: rgba(255,255,255,0.66)
+Text tertiary: rgba(255,255,255,0.46)
+Text disabled: rgba(255,255,255,0.28)
+
+App border idle: rgba(255,255,255,0.075)
+App border active: rgba(255,255,255,0.22)
+
+Shell border idle: rgba(255,255,255,0.11)
+Shell border active: rgba(255,255,255,0.24)
+
+Overlay border idle: rgba(255,255,255,0.16)
+Overlay border active: rgba(255,255,255,0.30)
+
+Success: #5CFF8B
+Error: #FF5C64
+
+SUCCESS разрешён только для semantic success.
+ERROR разрешён только для semantic error.
+
+======================================================================
+3. ТИПОГРАФИКА
+======================================================================
+
+Primary: Inter Variable.
+Mono: JetBrains Mono.
+
+Desktop UI:
+Title M 18/24 Medium
+Title S 15/20 Medium
+Body M 14/20 Regular
+Body S 12/17 Regular
+Caption 10/14 Regular
+Micro 9/12 Regular
+
+Top:
+12 px Medium.
+
+Window title:
+11 px Medium.
+
+Lock clock:
+88 px Inter Light.
+Lock date:
+23–24 px Regular/Light.
+
+Никакого bold 700 для обычных shell controls.
+
+======================================================================
+4. ФОН
+======================================================================
+
+#000000.
+Black star field.
+
+WORK:
+30–45 заметных точек на reference viewport.
+75% radius 0.55.
+18% radius 0.9.
+6% radius 1.25.
+1% radius 1.8 + halo.
+
+Звёзды:
+- deterministic;
+- static idle;
+- не мерцают;
+- не летят;
+- не вращаются.
+
+В FreeCanvas координаты связаны с canvas.
+В Anchored background визуально неподвижен.
+
+======================================================================
+5. TOP BAR WORK
+======================================================================
+
+Body height 38.
+Top margin 6.
+Left/right outer margin 16.
+
+LEFT:
+Arch identity.
+Gap 10.
+Smart workspace switcher.
+
+CENTER:
+Compact Search 248×38.
+
+RIGHT:
+network;
+audio;
+battery if exists;
+clock.
+
+Дата скрыта idle.
+Quote скрыта default.
+
+Top surface:
+Level B glass.
+Radius 10.
+No strong glow.
+
+Workspace:
+slots 32.
+active 30.
+max visible 5 + overflow.
+
+Search activation:
+248 -> 620 px in 160 ms.
+Results overlay beneath.
+
+======================================================================
+6. ОСНОВНОЙ DESKTOP
+======================================================================
+
+WORK не резервирует RightPanel и Dock по умолчанию.
+
+Safe area:
+left 12
+right 12
+top = topbar bottom + 12
+bottom 12
+
+Tiled gaps:
+outer 12
+inner 12
+
+Active window:
+border 0.22.
+Inactive:
+0.075.
+
+Titlebar:
+29 px.
+Tiled controls:
+app icon;
+title;
+optional close.
+
+Floating controls:
+normal minimize/maximize/close optional.
+
+======================================================================
+7. RIGHT PANEL
+======================================================================
+
+Width 290.
+States:
+Hidden / Peek / Pinned.
+
+Hidden:
+off-screen.
+
+Peek:
+overlay, no reflow.
+
+Pinned:
+reserve and reflow.
+
+Cards:
+System
+Servers
+Tasks
+optional extra widgets.
+
+System compact:
+no live graphs by default.
+
+Graph mode:
+ExpandedOnly default.
+
+Card radius:
+12.
+Padding:
+14.
+Gap:
+12.
+
+======================================================================
+8. DOCK
+======================================================================
+
+Default:
+AutoHideOverlay.
+
+Body height:
+58.
+Radius:
+12.
+Item:
+42.
+Icon:
+23.
+Gap:
+10.
+
+Reveal via bind/edge.
+No reflow default.
+
+======================================================================
+9. GLOBAL SEARCH
+======================================================================
+
+Closed:
+compact top trigger.
+
+Open:
+620 px width.
+Max height 500.
+Overlay Level C.
+
+Rows:
+44–46 high.
+Selected:
+white translucent background.
+
+No remote network dependency for local results.
+
+======================================================================
+10. NOTIFICATION TOAST
+======================================================================
+
+Width 330.
+Min height 78.
+Radius 12.
+Padding 12.
+
+Expanded reply only if capability supported.
+No layout reflow.
+
+Show 170 ms.
+Hide 130 ms.
+
+======================================================================
+11. NOTIFICATION CENTER
+======================================================================
+
+Level C.
+Right overlay.
+Width 360–380.
+Top below TopBar.
+Bottom 16.
+
+Header.
+Filters.
+Scrollable groups.
+Inline reply if supported.
+
+======================================================================
+12. SETTINGS
+======================================================================
+
+Three levels:
+Основные
+Расширенные
+Экспертные
+
+Основные не перегружены numeric/debug properties.
+Search crosses all levels.
+Live Preview right.
+Design Mode launch available.
+
+======================================================================
+13. DESIGN MODE
+======================================================================
+
+Default layout editing is container-based.
+Absolute x/y only Expert.
+
+Selected component:
+white outline alpha 0.70.
+Other editable:
+0.25.
+
+Snap:
+8 px.
+
+Emergency reset layout always available.
+
+======================================================================
+14. LOCK
+======================================================================
+
+No quote default.
+No hint.
+No password field idle.
+
+Top-left Arch.
+Top-right status.
+Center clock/date.
+Below avatar/name.
+
+Typing reveals password.
+
+No large container.
+
+======================================================================
+15. LOGIN
+======================================================================
+
+No central big card default.
+
+Center:
+avatar;
+username;
+password;
+session selector only if >=2 sessions.
+
+Enter submits.
+Power bottom-left.
+
+======================================================================
+16. ZEN BROWSER
+======================================================================
+
+System-like browser chrome.
+Website content remains website content.
+
+WORK new-tab:
+black+stars.
+Search.
+quick actions.
+optional recent.
+
+Showcase preset:
+cosmic landscape.
+
+======================================================================
+17. MOTION
+======================================================================
+
+hover 90
+press 65
+focus 105
+window open 150
+window close 130
+layout 160
+panel show 205
+panel hide 185
+dock show 195
+dock hide 175
+toast show 170
+toast hide 130
+search 160
+camera 250
+
+No bounce.
+No large overshoot.
+Interruptible.
+
+======================================================================
+18. REFERENCE PROFILE
+======================================================================
+
+Для визуального воспроизведения старых изображений:
+Right Pinned;
+Dock visible;
+Search 474;
+All9 workspaces;
+graphs Always;
+legacy stronger glass;
+browser Cosmic;
+optional quote.
+
+Все эти отличия являются profile values, а не отдельным кодом.
+
+======================================================================
+V3 — НОРМАТИВНАЯ РЕДАКЦИЯ ДЛЯ ЕЖЕДНЕВНОЙ РАБОТЫ
+======================================================================
+
+СТАТУС V3
+Эта редакция исправляет главный недостаток ранних референсов: они были оптимизированы прежде всего под красивый статичный скриншот, а не под многочасовую работу программиста, администратора серверов и пользователя tiling-WM.
+
+V3 НЕ отменяет возможность воспроизвести исходные изображения. Вместо этого вводятся два чётко разделённых режима оформления:
+
+1. WORK — основной production-профиль. Он обязан быть максимально спокойным, быстрым и не занимать экран без необходимости.
+2. REFERENCE / SHOWCASE — профиль, который максимально близко воспроизводит исходные изображения: закреплённая правая колонка, видимый dock, широкая строка поиска и более выраженное стекло.
+
+Если пользователь не выбрал профиль явно, запускается WORK.
+
+При конфликте между старым текстом V1/V2 и этим блоком V3 применяется V3.
+
+======================================================================
+V3.1. ГЛАВНЫЙ ПРИНЦИП
+======================================================================
+
+Оболочка должна исчезать, когда она не нужна.
+
+Функциональность не должна доказывать своё существование постоянным присутствием на экране. Большая часть возможностей вызывается по бинду, hover-edge, search или popover.
+
+Нормальный рабочий экран должен визуально состоять только из:
+- чёрного фона со слабыми звёздами;
+- компактной верхней панели;
+- рабочих окон;
+- кратковременных уведомлений при необходимости.
+
+Правой колонке, dock, notification center, popover, large search, design guides и дополнительным виджетам запрещено быть постоянно видимыми в WORK, если пользователь их явно не закрепил.
+
+======================================================================
+V3.2. ИЕРАРХИЯ МАТЕРИАЛОВ
+======================================================================
+
+Ранее один и тот же выраженный glass применялся почти ко всем поверхностям. В V3 это запрещено.
+
+Материалы делятся на три уровня.
+
+LEVEL A — APPLICATION / WORK SURFACE
+Использование:
+- обычные окна приложений;
+- tiled windows;
+- IDE;
+- terminal;
+- browser outer frame.
+
+Параметры:
+background = rgba(5,6,7,0.94)
+fallback = #050607
+backdrop blur = 0..8 px, default 4
+border idle = rgba(255,255,255,0.075)
+border active = rgba(255,255,255,0.22)
+inner highlight = rgba(255,255,255,0.025)
+shadow alpha = 0.24
+shadow blur = 18
+shadow Y = 5
+
+Цель: окно читается как спокойная рабочая поверхность, а не как декоративная стеклянная карточка.
+
+LEVEL B — SHELL GLASS
+Использование:
+- TopBar pills;
+- RightPanel;
+- Dock;
+- system popovers;
+- Settings navigation;
+- secondary shell cards.
+
+Параметры:
+background = rgba(8,10,11,0.82)
+backdrop blur = 14..18 px, default 16
+border idle = rgba(255,255,255,0.11)
+border active = rgba(255,255,255,0.24)
+shadow alpha = 0.30
+shadow blur = 20
+
+LEVEL C — TEMPORARY OVERLAY GLASS
+Использование:
+- Global Search;
+- Command Palette;
+- Notification Center;
+- transient quick reply;
+- modal selector;
+- Design Mode inspector.
+
+Параметры:
+background = rgba(8,10,11,0.88)
+backdrop blur = 20..24 px, default 22
+border = rgba(255,255,255,0.16)
+active border = rgba(255,255,255,0.30)
+shadow alpha = 0.42
+shadow blur = 28
+
+Запрещено:
+- применять Level C blur ко всем окнам;
+- давать каждому контейнеру одинаково яркую рамку;
+- делать nested glass-card внутри nested glass-card без функциональной причины.
+
+======================================================================
+V3.3. ЦВЕТ: ЗЕЛЁНЫЙ И КРАСНЫЙ ТОЛЬКО КАК СЕМАНТИКА
+======================================================================
+
+Внутренняя shell-палитра остаётся четырёхцветной:
+- чёрный;
+- белый;
+- зелёный;
+- красный.
+
+Но в V3 вводится более строгое правило.
+
+БЕЛЫЙ/СЕРЫЙ:
+- CPU graph;
+- RAM graph;
+- disk usage;
+- network graph;
+- обычные progress bars;
+- активное окно;
+- keyboard focus;
+- выделение workspace;
+- running application;
+- hover.
+
+ЗЕЛЁНЫЙ:
+- online;
+- connected;
+- successful;
+- completed;
+- healthy;
+- authentication success;
+- task done;
+- operation finished successfully.
+
+КРАСНЫЙ:
+- offline;
+- failed;
+- critical;
+- authentication failure;
+- server unreachable;
+- destructive warning marker;
+- urgent state.
+
+CPU=12% НЕ является success и не окрашивается зелёным.
+RAM=40% НЕ является success и не окрашивается зелёным.
+Активное окно НЕ зелёное.
+Выбранная вкладка НЕ зелёная.
+Running app в Dock НЕ зелёный.
+
+Если статус невозможно однозначно отнести к success/error, он отображается белым с нужной opacity.
+
+======================================================================
+V3.4. WORK PROFILE — КАНОНИЧЕСКИЙ ВИД
+======================================================================
+
+WORK является основным рабочим профилем.
+
+По умолчанию:
+rightPanel.state = Hidden
+rightPanel.reserve = false
+dock.mode = AutoHideOverlay
+dock.reserve = false
+top.search.mode = Compact
+top.quote.visible = false
+workspaceSwitcher.mode = SmartCompact
+window.blur = 4
+window.titlebar.mode = Compact
+window.borderStrength = Low
+stars.density = Low
+metricsGraphs.mode = OnDemand
+notifications.mode = Normal
+focusMode.available = true
+
+На обычном desktop пользователь должен видеть:
+- Arch identity либо компактный launcher trigger;
+- workspace switcher;
+- compact global search trigger;
+- tray/clock;
+- приложения.
+
+Никаких постоянных Server/Tasks/System cards справа без явного pin.
+
+======================================================================
+V3.5. REFERENCE / SHOWCASE PROFILE
+======================================================================
+
+Этот профиль нужен для максимально точного воспроизведения исходных изображений.
+
+По умолчанию:
+rightPanel.state = Pinned
+rightPanel.reserve = true
+dock.mode = VisibleOverlay или VisibleReserve согласно конкретному golden state
+top.search.mode = Wide
+top.quote.visible = configurable, для исторического screenshot может быть true
+workspaceSwitcher.mode = All9
+window.material = LegacyGlassCompatible
+metricsGraphs.mode = Always
+stars.density = Reference
+browser.newTab.preset = Cosmic
+
+REFERENCE не является основным повседневным профилем.
+
+======================================================================
+V3.6. TOP BAR — НОВАЯ КОМПОЗИЦИЯ WORK
+======================================================================
+
+TopBar WORK не должен визуально конкурировать с приложениями.
+
+Reference height:
+38 px body.
+Top margin:
+6 px.
+
+LEFT GROUP:
+- Arch icon;
+- optional text «Arch Linux»;
+- workspace switcher.
+Между identity и switcher gap 10 px.
+
+CENTER:
+compact search trigger.
+
+RIGHT:
+network;
+audio;
+battery если имеется;
+time.
+Дата по умолчанию не занимает постоянное место.
+
+Дата открывается:
+- click clock;
+- keyboard action;
+- optional setting alwaysShowDate=true.
+
+TOP SEARCH WORK:
+width = 248 px reference.
+height = 38 px.
+placeholder = «Поиск…»
+icon 16.
+Никакой длинной фразы «Поиск приложений, файлов и команд…» в idle state.
+
+При Super+Space:
+ширина визуально разворачивается 248 -> 620 px.
+После открытия появляется полноценная Command Palette.
+
+REFERENCE Wide Search сохраняет старую геометрию около 474 px.
+
+QUOTE:
+default WORK = false.
+Включение quote не меняет Safe Area.
+Quote не участвует в keyboard navigation.
+
+======================================================================
+V3.7. WORKSPACE SWITCHER — SMART COMPACT
+======================================================================
+
+Девять quick slots 1..9 сохраняются функционально.
+Super+1..9 всегда доступны.
+
+В WORK визуально не нужно всегда показывать все девять.
+
+SmartCompact отображает:
+- active zone;
+- ближайшие 2 зоны слева/справа, если существуют;
+- занятые quick slots до максимума 5 видимых;
+- overflow «···», если зон больше.
+
+Пример:
+1 2 [3] 4 5 ···
+
+Ширина слота:
+32 px.
+Active:
+30×30.
+Overflow:
+32×30.
+
+Hover/click overflow открывает маленький zone popover.
+Scroll по workspace group может переключать зоны, если setting включён.
+
+REFERENCE mode All9 воспроизводит 1..9 как на исходных изображениях.
+
+Свободный canvas state показывается не текстом, а формой индикатора:
+Anchored: [3]
+FreeCanvas: тонкий hollow-ring вокруг «3» либо marker с разомкнутыми углами.
+
+Никаких надписей «Свободный режим» на desktop.
+
+======================================================================
+V3.8. RIGHT PANEL — ТРИ СОСТОЯНИЯ
+======================================================================
+
+Вместо бинарного show/hide вводятся:
+
+Hidden
+Peek
+Pinned
+
+HIDDEN:
+- surface полностью за правой границей;
+- input region пуст;
+- Safe Area не резервируется;
+- видимых 1–8 px hotzone по умолчанию НЕТ, если управление bind-only;
+- optional edge hotzone включается настройкой.
+
+PEEK:
+- панель выезжает поверх текущих окон;
+- Safe Area НЕ меняется;
+- окна НЕ перераскладываются;
+- panel z-level выше application windows;
+- закрывается по повторному bind, Escape, click outside или timeout, если autoClose=true.
+
+PINNED:
+- панель резервирует ширину;
+- tiling пересчитывается;
+- panel остаётся до явного unpin.
+
+Recommended binds:
+Super+R -> Hidden <-> Peek
+Super+Shift+R -> Pinned <-> Hidden/previous state
+
+Peek width:
+290 px reference.
+Pinned width:
+290 px reference.
+
+Peek нельзя автоматически превращать в Pinned.
+
+В WORK default Hidden.
+В REFERENCE default Pinned.
+
+======================================================================
+V3.9. RIGHT PANEL — СПОКОЙНАЯ ИНФОРМАЦИЯ
+======================================================================
+
+System card по умолчанию НЕ показывает постоянно анимированные sparkline-графики.
+
+Compact system rows:
+CPU       12%
+Память    41%
+Диск      18%
+Сеть      ↓ 1.2 МБ/с ↑ 130 КБ/с
+
+Progress/graph:
+- белые;
+- graph скрыт idle;
+- появляется по hover row, expand card или «Подробно».
+
+metricsGraphs modes:
+Off
+OnHover
+ExpandedOnly
+Always
+
+WORK default = ExpandedOnly.
+REFERENCE = Always.
+
+Servers:
+зелёная/красная только status dot и semantic text.
+Latency/uptime — белый secondary.
+
+Tasks:
+completed checkbox green.
+Название выполненной задачи не обязано становиться зелёным.
+
+======================================================================
+V3.10. DOCK
+======================================================================
+
+WORK default:
+AutoHideOverlay.
+Не резервирует нижнюю часть экрана.
+
+Reveal:
+- Super+D;
+- optional pointer edge trigger;
+- optional swipe gesture.
+
+Edge reveal delay:
+120 ms.
+Hide delay:
+350 ms после ухода pointer, если dock не имеет active popover.
+
+Body:
+height 58 px reference.
+item hit = 42×42.
+icon = 23 px.
+radius = 12.
+
+Dock visible не вызывает layout reflow в WORK.
+Pinned/reserve dock остаётся доступной настройкой и используется в REFERENCE при необходимости.
+
+Running app indicator:
+white.
+Urgent:
+red.
+Success-service:
+green только если элемент Dock действительно отображает semantic service state, а не просто запущенное приложение.
+
+======================================================================
+V3.11. ОКНА — МЕНЬШЕ РАМОК, МЕНЬШЕ BLUR
+======================================================================
+
+WORK window:
+radius = 10 px.
+idle border = rgba(255,255,255,0.075)
+active border = rgba(255,255,255,0.22)
+shadow = subtle.
+
+Не использовать active border alpha 0.42 в WORK.
+0.42 остаётся допустимым только в Reference/HighContrast.
+
+Titlebar WORK:
+height = 29 px.
+Содержимое:
+- app icon 13–14;
+- title 11;
+- optional close button.
+Minimize/maximize по умолчанию скрыты для tiled windows.
+
+Для floating:
+titlebar может показывать minimize/maximize/close.
+
+Для tiled:
+Monocle/fullscreen вызываются shell/window-manager action, а не обязательной кнопкой.
+
+Active window дополнительно может иметь:
+- 1 px top inner highlight alpha 0.14;
+но никакого glow.
+
+======================================================================
+V3.12. TILING — БЫСТРЕЕ И ВИЗУАЛЬНО СПОКОЙНЕЕ
+======================================================================
+
+WORK gaps:
+inner = 10–12 px, default 12.
+outer = 12 px.
+
+REFERENCE:
+может сохранять 14 px.
+
+Layout animation WORK:
+160 ms default.
+Resize settle:
+90–110 ms.
+Window insertion:
+150 ms.
+Window removal:
+140 ms.
+
+Во время непрерывного mouse resize:
+не использовать 160 ms tween на каждый event;
+visual follows pointer практически напрямую с минимальным smoothing.
+
+======================================================================
+V3.13. ФОН И ЗВЁЗДЫ
+======================================================================
+
+WORK:
+видимых заметных точек на 1672×941 примерно 30–45.
+REFERENCE:
+45–60.
+
+Звёзды статичны при Anchored.
+
+Под рабочими поверхностями яркость star-field должна визуально подавляться:
+- application Level A surface достаточно непрозрачна сама;
+- дополнительный mask attenuation допустим до 30%, если blur делает фон слишком читаемым.
+
+Никакой активной анимации звёзд idle.
+Никаких движущихся частиц.
+Никакого twinkle-loop по умолчанию.
+
+======================================================================
+V3.14. SETTINGS — ТРИ УРОВНЯ СЛОЖНОСТИ
+======================================================================
+
+Все публичные параметры остаются настраиваемыми, но не показываются одним гигантским списком.
+
+LEVEL 1 «Основные»:
+- Внешний вид;
+- Панели;
+- Окна;
+- Рабочие области;
+- Уведомления;
+- Анимации;
+- Горячие клавиши;
+- Браузер;
+- Серверы.
+
+LEVEL 2 «Расширенные»:
+- blur;
+- opacity;
+- gaps;
+- radii;
+- Safe Area policy;
+- layout insertion;
+- notification rules;
+- app rules;
+- multi-monitor;
+- performance.
+
+LEVEL 3 «Экспертные»:
+- точные координаты reference profile;
+- bezier;
+- transform;
+- animation delays/stagger;
+- raw component tokens;
+- sampling intervals;
+- IPC diagnostics;
+- shader options;
+- debug overlays.
+
+Search Settings находит параметры всех уровней.
+Если поиск находит Expert property, он может показать его напрямую, не заставляя вручную включать Expert page.
+
+======================================================================
+V3.15. DESIGN MODE — КОНТЕЙНЕРЫ ВМЕСТО ХАОТИЧНЫХ КООРДИНАТ
+======================================================================
+
+Пользователь может настроить практически всё, но обычный Design Mode работает через layout containers.
+
+TopBar:
+LeftContainer
+CenterContainer
+RightContainer
+
+RightPanel:
+VerticalStackContainer
+
+Dock:
+HorizontalDockContainer
+
+Notification:
+ToastAnchorContainer
+
+Allowed:
+- reorder;
+- show/hide;
+- resize;
+- padding;
+- gap;
+- align;
+- anchor;
+- group;
+- detach в custom container;
+- animation preset.
+
+Free absolute x/y существует только в Expert Mode.
+
+При absolute mode:
+- включается safe bounds;
+- нельзя сделать системный Settings launcher, lock-critical controls и аварийный restore path полностью недоступными;
+- «Сбросить расположение» всегда доступно через emergency hotkey.
+
+======================================================================
+V3.16. GLOBAL SEARCH
+======================================================================
+
+Idle TopBar search — маленький trigger.
+Полная панель существует только после вызова.
+
+Open width:
+620 px reference.
+max height:
+500 px.
+
+Первые результаты:
+Apps / Windows / Zones / Commands.
+
+Secondary providers:
+Settings / Files / Servers / Browser bookmarks.
+
+Search UI должен визуально быть самым выраженным glass overlay, потому что он временный.
+
+======================================================================
+V3.17. LOCK SCREEN — ЕЩЁ МИНИМАЛИСТИЧНЕЕ
+======================================================================
+
+WORK/default lock содержит:
+- Arch identity top-left;
+- compact status pill top-right;
+- большие часы;
+- дату;
+- avatar;
+- username.
+
+Default:
+quote=false.
+notifications content=false.
+password box hidden пока пользователь не начал ввод.
+никаких подсказок.
+никаких кнопок в центре.
+никакой большой card вокруг пользователя.
+
+После первого печатного символа:
+- clock translateY -18 px;
+- scale 1 -> 0.94;
+- date opacity 1 -> 0.55;
+- password line/pill появляется под username.
+
+Password control:
+width 300 px.
+height 40.
+background почти прозрачный Level B.
+border idle 0.12.
+focus 0.28 white.
+
+Wrong:
+короткий red border + shake.
+Не выводить большой текст ошибки, если PAM не требует конкретное сообщение.
+Можно показать «Неверный пароль» маленьким 11 px text на 1.5 s, если user setting enabled; default off.
+
+======================================================================
+V3.18. LOGIN / GREETER — БЕЗ БОЛЬШОЙ GLASS CARD
+======================================================================
+
+Ранее login помещался в крупную центральную glass-card. В WORK V3 card удаляется.
+
+Центральная вертикальная группа:
+avatar 78 px;
+username;
+password pill;
+optional session selector только при >=2 session;
+login action implicit Enter, отдельная кнопка «Войти» по умолчанию скрыта.
+
+Если pointer-oriented profile:
+кнопку «Войти» можно включить.
+
+Spacing:
+avatar -> username: 10 px.
+username -> password: 30 px.
+password -> session selector: 10 px, если selector есть.
+
+Power controls:
+bottom-left.
+Тонкие белые icon buttons.
+
+Фон:
+black+stars.
+
+REFERENCE profile может сохранять старую card-композицию для точного воспроизведения исторического изображения.
+
+======================================================================
+V3.19. АНИМАЦИИ — НОВЫЕ WORK DEFAULTS
+======================================================================
+
+WORK:
+
+hover enter       90 ms
+hover exit        80 ms
+press              65 ms
+release            90 ms
+focus             105 ms
+window open       150 ms
+window close      130 ms
+layout            160 ms
+workspace marker  150 ms
+panel hide        185 ms
+panel show        205 ms
+dock hide         175 ms
+dock show         195 ms
+toast show        170 ms
+toast hide        130 ms
+search open       160 ms
+search close      130 ms
+camera            250 ms
+anchor/free mode  230 ms
+login reveal      190 ms
+
+REFERENCE может использовать V2 durations.
+
+Основной easing:
+cubic-bezier(0.20,0.80,0.20,1.00)
+
+Camera:
+cubic-bezier(0.16,1.00,0.30,1.00)
+
+Анимации interruptible.
+
+======================================================================
+V3.20. ВИЗУАЛЬНЫЙ ПРИОРИТЕТ
+======================================================================
+
+Уровни внимания:
+
+0 — фон.
+1 — inactive applications.
+2 — active application.
+3 — pinned shell.
+4 — temporary shell overlays.
+5 — notification/urgent event.
+6 — authentication/security.
+
+RightPanel в Pinned не должен быть ярче активного IDE.
+Dock не должен быть ярче активного окна.
+Inactive card borders не должны образовывать сетку белых прямоугольников.
+
+======================================================================
+V3.21. ZEN BROWSER
+======================================================================
+
+Тема Zen контролирует:
+- browser chrome;
+- sidebar;
+- tabs;
+- URL bar;
+- split separators;
+- нашу new-tab page.
+
+Она НЕ пытается перекрасить arbitrary websites в системные 4 цвета.
+
+WORK new-tab:
+- black+stars;
+- compact Zen identity;
+- search;
+- 4–6 quick actions;
+- recent optional;
+- без большого пейзажа.
+
+Cosmic landscape — optional preset «Showcase».
+
+Browser outer frame в WORK использует Level A, а не Level C.
+
+======================================================================
+V3.22. УВЕДОМЛЕНИЯ
+======================================================================
+
+Toast должен быть информативным, но не выглядеть как огромная карточка.
+
+Compact toast default:
+width 330 px.
+min height 78.
+padding 12.
+title 13.
+body 11–12.
+max body lines 3.
+
+Actions появляются только при наличии capabilities.
+Reply раздвигает toast до expanded state.
+
+Notification Center — Level C overlay.
+
+Toast в WORK не должен вызывать reflow окон.
+
+======================================================================
+V3.23. ФИНАЛЬНЫЙ ОБРАЗ WORK
+======================================================================
+
+Нормальный кадр WORK должен выглядеть примерно так по визуальной плотности:
+
+верх:
+Arch / рабочие зоны / компактный поиск / состояние / часы
+
+центр:
+только рабочие окна
+
+право:
+ничего, пока пользователь не вызвал Peek/Pin
+
+низ:
+ничего, пока Dock не вызван
+
+Поэтому интерфейс остаётся узнаваемым по материалам, шрифту, фону и движению, а не за счёт постоянного количества виджетов.
+
+======================================================================
+V3.24. НОВЫЕ DESIGN TOKENS
+======================================================================
+
+profile.default = "work"
+
+material.app.background = rgba(5,6,7,0.94)
+material.app.blur = 4
+material.app.borderIdle = rgba(255,255,255,0.075)
+material.app.borderActive = rgba(255,255,255,0.22)
+
+material.shell.background = rgba(8,10,11,0.82)
+material.shell.blur = 16
+material.shell.borderIdle = rgba(255,255,255,0.11)
+material.shell.borderActive = rgba(255,255,255,0.24)
+
+material.overlay.background = rgba(8,10,11,0.88)
+material.overlay.blur = 22
+material.overlay.borderIdle = rgba(255,255,255,0.16)
+material.overlay.borderActive = rgba(255,255,255,0.30)
+
+window.radius = 10
+window.titlebarHeight = 29
+window.innerGap = 12
+window.outerGap = 12
+
+top.height = 38
+top.search.work.width = 248
+top.search.reference.width = 474
+
+workspace.slot = 32
+workspace.active = 30
+workspace.work.maxVisible = 5
+
+right.width = 290
+right.work.defaultState = Hidden
+right.peek.reserve = false
+right.pinned.reserve = true
+
+dock.height = 58
+dock.work.mode = AutoHideOverlay
+dock.itemHit = 42
+dock.icon = 23
+
+stars.work.countApprox = 30..45
+stars.reference.countApprox = 45..60
+
+motion.hover = 90
+motion.press = 65
+motion.windowOpen = 150
+motion.windowClose = 130
+motion.layout = 160
+motion.panelShow = 205
+motion.panelHide = 185
+motion.dockShow = 195
+motion.dockHide = 175
+motion.toastShow = 170
+motion.toastHide = 130
+motion.search = 160
+motion.camera = 250
+
+======================================================================
+V3.25. ПРАВИЛА ПРИЁМКИ V3
+======================================================================
+
+WORK FAIL, если:
+- RightPanel закреплена при чистом первом запуске.
+- Dock постоянно резервирует место при чистом первом запуске.
+- Top search занимает старые 474 px в idle.
+- CPU/RAM/Network по умолчанию зелёные.
+- inactive window border визуально почти такой же яркий, как active.
+- обычное tiled окно имеет крупный классический titlebar.
+- lock показывает quote по умолчанию.
+- login показывает большую центральную glass-card по умолчанию.
+- Settings сразу вываливает expert properties в основной экран.
+- Design Mode разрешает случайно потерять критические shell controls.
+- звёзды заметно двигаются/мерцают в idle.
+- system wallpaper является пейзажем.
+- Zen theme пытается насильно перекрасить сайты.
+- RightPanel Peek вызывает reflow.
+- Dock AutoHideOverlay вызывает reflow.
+- обычные анимации ощущаются длиннее ~210 ms, кроме camera.
+
+REFERENCE FAIL, если:
+- нельзя воспроизвести исторический вид со старой pinned right column, dock, wide search и browser cosmic preset.

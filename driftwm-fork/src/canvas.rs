@@ -1,0 +1,1355 @@
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::time::Duration;
+
+use smithay::utils::{Logical, Point, Rectangle, Size};
+
+use crate::config::Direction;
+
+/// Hard floor for zoom — prevents division by zero / absurd values.
+pub const MIN_ZOOM_FLOOR: f64 = 0.001;
+/// Maximum zoom level (100% — native resolution, no magnification).
+pub const MAX_ZOOM: f64 = 1.0;
+
+/// A position in screen-local coordinates (0,0 = top-left of the output).
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenPos(pub Point<f64, Logical>);
+
+/// A position in infinite canvas coordinates (absolute world position).
+#[derive(Debug, Clone, Copy)]
+pub struct CanvasPos(pub Point<f64, Logical>);
+
+/// screen_pos = (canvas_pos - camera) * zoom  ⟹  canvas = screen / zoom + camera
+#[inline]
+pub fn screen_to_canvas(screen: ScreenPos, camera: Point<f64, Logical>, zoom: f64) -> CanvasPos {
+    CanvasPos(Point::from((
+        screen.0.x / zoom + camera.x,
+        screen.0.y / zoom + camera.y,
+    )))
+}
+
+/// canvas_pos → screen_pos = (canvas - camera) * zoom
+#[inline]
+pub fn canvas_to_screen(canvas: CanvasPos, camera: Point<f64, Logical>, zoom: f64) -> ScreenPos {
+    ScreenPos(Point::from((
+        (canvas.0.x - camera.x) * zoom,
+        (canvas.0.y - camera.y) * zoom,
+    )))
+}
+
+/// Clamp a screen-local position into an output of `size`. The far bound is one
+/// short of the edge so the result stays an addressable pixel of that output
+/// rather than the first one of whatever sits beyond it.
+#[inline]
+pub fn clamp_to_output(pos: ScreenPos, size: Size<i32, Logical>) -> ScreenPos {
+    ScreenPos(Point::from((
+        pos.0.x.clamp(0.0, size.w as f64 - 1.0),
+        pos.0.y.clamp(0.0, size.h as f64 - 1.0),
+    )))
+}
+
+/// Focus location for a screen-space surface (wlr layer, screen-pinned window):
+/// smithay derives surface-local coords as `location - focus_loc` with the
+/// pointer/touch location in canvas coords, so the surface's screen origin is
+/// shifted by (canvas - screen) to make the subtraction come out in screen space.
+#[inline]
+pub fn screen_space_focus_loc(
+    origin: ScreenPos,
+    canvas: CanvasPos,
+    screen: ScreenPos,
+) -> Point<f64, Logical> {
+    origin.0 + (canvas.0 - screen.0)
+}
+
+/// Inverse of [`screen_space_focus_loc`]: recover the surface's screen origin
+/// from an adjusted focus location.
+#[inline]
+pub fn screen_space_origin(
+    focus_loc: Point<f64, Logical>,
+    canvas: CanvasPos,
+    screen: ScreenPos,
+) -> ScreenPos {
+    ScreenPos(focus_loc - (canvas.0 - screen.0))
+}
+
+/// Convert internal canvas coords (top-left origin, Y-down) to the user-facing
+/// window-rule convention (center, Y-up) used by config rules, the state file, and IPC.
+///
+/// Chrome-blind: it converts whatever rect it is handed. Window callers want
+/// [`content_to_rule`], which inflates to the visual frame first.
+#[inline]
+pub fn internal_to_rule(loc: Point<i32, Logical>, size: Size<i32, Logical>) -> (i32, i32) {
+    (loc.x + size.w / 2, -(loc.y + size.h / 2))
+}
+
+/// Inverse of [`internal_to_rule`], and chrome-blind in the same way.
+/// [`rule_to_content`] is the window-shaped form.
+#[inline]
+pub fn rule_to_internal(x: i32, y: i32, size: Size<i32, Logical>) -> Point<i32, Logical> {
+    Point::from((x - size.w / 2, -y - size.h / 2))
+}
+
+/// The compositor-drawn chrome around a window's content: the SSD title-bar
+/// strip above it, and a border outside all four sides (outside the bar, too).
+///
+/// Every user-facing size and position — window-rule `size`/`position`, the
+/// state file, `driftwm msg move`/`resize`, the durable session file — describes
+/// the **visual frame**, content plus this chrome, so a script can lay windows
+/// out without knowing which of them are server-decorated. Compositor state
+/// stays content-space (`stage.position_of` is the content top-left,
+/// `geometry().size` the content size); each user-facing boundary converts here.
+///
+/// A window's *center* is chrome-sensitive only through `bar`: a border is
+/// symmetric, so it cancels. Sizes need both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Chrome {
+    /// SSD title-bar height. Zero for a client-decorated or undecorated window;
+    /// a suspended stand-in always wears one.
+    pub bar: i32,
+    /// Border width on each side.
+    pub border: i32,
+}
+
+impl Chrome {
+    /// No chrome at all — a fullscreen window, or a bare CSD one.
+    pub const NONE: Chrome = Chrome { bar: 0, border: 0 };
+
+    /// The visual frame size a content size occupies.
+    #[inline]
+    pub fn frame_size(self, size: Size<i32, Logical>) -> Size<i32, Logical> {
+        Size::from((
+            size.w + 2 * self.border,
+            size.h + self.bar + 2 * self.border,
+        ))
+    }
+
+    /// The content size inside a visual frame, floored at 1x1: a frame no bigger
+    /// than its own chrome would otherwise deflate to nothing, and a client can
+    /// never be configured with a zero dimension.
+    #[inline]
+    pub fn content_size(self, frame: Size<i32, Logical>) -> Size<i32, Logical> {
+        Size::from((
+            (frame.w - 2 * self.border).max(1),
+            (frame.h - self.bar - 2 * self.border).max(1),
+        ))
+    }
+
+    /// The visual frame's top-left for a content top-left.
+    #[inline]
+    pub fn frame_loc(self, loc: Point<i32, Logical>) -> Point<i32, Logical> {
+        Point::from((loc.x - self.border, loc.y - self.bar - self.border))
+    }
+
+    /// Inverse of [`Chrome::frame_loc`].
+    #[inline]
+    pub fn content_loc(self, frame_loc: Point<i32, Logical>) -> Point<i32, Logical> {
+        Point::from((
+            frame_loc.x + self.border,
+            frame_loc.y + self.bar + self.border,
+        ))
+    }
+}
+
+/// How a window's screen-space visual frame sits against an output's usable
+/// area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coverage {
+    /// An edge falls short, leaving the canvas showing along it.
+    None,
+    /// Flush with the usable area on every edge.
+    Exact,
+    /// Covers it, and spills past at least one edge.
+    Overhang,
+}
+
+/// How `frame` (output-local logical px) relates to `usable`, tolerating float
+/// noise — but nothing wider — per edge.
+///
+/// A frame short by even a fraction of a pixel leaves a hairline of wallpaper
+/// along that edge, and square corners over a visible sliver read as a bug
+/// where rounded ones read as a floating window, so anything short is
+/// [`Coverage::None`] and panning a covering window by a pixel brings its
+/// chrome straight back. [`Coverage::Overhang`] is kept apart from
+/// [`Coverage::Exact`] because chrome drawn past the usable edge lands under a
+/// panel or off the output rather than around the window.
+pub fn coverage(frame: Rectangle<f64, Logical>, usable: Rectangle<i32, Logical>) -> Coverage {
+    const NOISE: f64 = 1e-6;
+    let usable = usable.to_f64();
+    // Per edge, how far the frame falls short of the usable area; negative
+    // means it reaches past. NaN fails the `all` and reads as no coverage.
+    let shortfall = [
+        frame.loc.x - usable.loc.x,
+        frame.loc.y - usable.loc.y,
+        (usable.loc.x + usable.size.w) - (frame.loc.x + frame.size.w),
+        (usable.loc.y + usable.size.h) - (frame.loc.y + frame.size.h),
+    ];
+    if !shortfall.iter().all(|d| *d <= NOISE) {
+        return Coverage::None;
+    }
+    if shortfall.iter().any(|d| *d < -NOISE) {
+        return Coverage::Overhang;
+    }
+    Coverage::Exact
+}
+
+/// User-facing coordinates for a window whose content sits at `loc` with content
+/// `size`: its visual frame's center, Y-up. The chrome-aware form of
+/// [`internal_to_rule`].
+#[inline]
+pub fn content_to_rule(
+    loc: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    chrome: Chrome,
+) -> (i32, i32) {
+    internal_to_rule(chrome.frame_loc(loc), chrome.frame_size(size))
+}
+
+/// Inverse of [`content_to_rule`]: the content top-left that puts a window of
+/// content `size` wearing `chrome` at the user-facing point `(x, y)`.
+#[inline]
+pub fn rule_to_content(
+    x: i32,
+    y: i32,
+    size: Size<i32, Logical>,
+    chrome: Chrome,
+) -> Point<i32, Logical> {
+    chrome.content_loc(rule_to_internal(x, y, chrome.frame_size(size)))
+}
+
+/// A screen-pinned window's top-left screen position (output-relative, top-left
+/// origin, Y-down) for a window-rule `position` `(x, y)` — window center,
+/// output-center origin, Y-up — on an output of `output_size`. Callers clamp the
+/// result into the output. Inverse of [`screen_top_left_to_rule`].
+#[inline]
+pub fn rule_to_screen_top_left(
+    x: i32,
+    y: i32,
+    size: Size<i32, Logical>,
+    output_size: Size<i32, Logical>,
+) -> Point<i32, Logical> {
+    let internal = rule_to_internal(x, y, size);
+    Point::from((
+        output_size.w / 2 + internal.x,
+        output_size.h / 2 + internal.y,
+    ))
+}
+
+/// Inverse of [`rule_to_screen_top_left`]: a screen-pinned window's top-left
+/// screen position back to window-rule coords (window center, output-center
+/// origin, Y-up) — the numbers a `pinned_to_screen` rule's `position` takes, so
+/// `driftwm msg state` values paste straight into a rule.
+#[inline]
+pub fn screen_top_left_to_rule(
+    screen_pos: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    output_size: Size<i32, Logical>,
+) -> (i32, i32) {
+    let internal = Point::from((
+        screen_pos.x - output_size.w / 2,
+        screen_pos.y - output_size.h / 2,
+    ));
+    internal_to_rule(internal, size)
+}
+
+/// The viewport center in canvas coords, in the user-facing convention (Y-up).
+/// Shared by the state file and IPC so they can't drift. Inverse of
+/// [`camera_for_center`].
+#[inline]
+pub fn viewport_center(
+    camera: Point<f64, Logical>,
+    zoom: f64,
+    viewport: Size<i32, Logical>,
+) -> (f64, f64) {
+    (
+        camera.x + viewport.w as f64 / (2.0 * zoom),
+        -(camera.y + viewport.h as f64 / (2.0 * zoom)),
+    )
+}
+
+/// The camera (internal top-left, Y-down) that centers the viewport on the Y-up
+/// point `(x, y)`. Inverse of [`viewport_center`].
+#[inline]
+pub fn camera_for_center(
+    x: f64,
+    y: f64,
+    zoom: f64,
+    viewport: Size<i32, Logical>,
+) -> Point<f64, Logical> {
+    Point::from((
+        x - viewport.w as f64 / (2.0 * zoom),
+        -y - viewport.h as f64 / (2.0 * zoom),
+    ))
+}
+
+/// Fraction of a rectangle's area visible in the current viewport (0.0–1.0).
+/// Returns 0.0 for zero-area rectangles.
+pub fn visible_fraction(
+    rect_loc: Point<i32, Logical>,
+    rect_size: Size<i32, Logical>,
+    camera: Point<f64, Logical>,
+    viewport_size: Size<i32, Logical>,
+    zoom: f64,
+) -> f64 {
+    let area = rect_size.w as f64 * rect_size.h as f64;
+    if area <= 0.0 {
+        return 0.0;
+    }
+
+    let vw = viewport_size.w as f64 / zoom;
+    let vh = viewport_size.h as f64 / zoom;
+
+    let ix_min = (rect_loc.x as f64).max(camera.x);
+    let ix_max = ((rect_loc.x + rect_size.w) as f64).min(camera.x + vw);
+    let iy_min = (rect_loc.y as f64).max(camera.y);
+    let iy_max = ((rect_loc.y + rect_size.h) as f64).min(camera.y + vh);
+
+    let iw = (ix_max - ix_min).max(0.0);
+    let ih = (iy_max - iy_min).max(0.0);
+
+    (iw * ih) / area
+}
+
+/// Check whether an arbitrary canvas point is visible in the current viewport.
+/// At zoom < 1.0, the visible area is larger: viewport_size / zoom. Bounds are
+/// inclusive on both edges (a point exactly on an edge counts as visible).
+pub fn is_point_visible(
+    point: Point<f64, Logical>,
+    camera: Point<f64, Logical>,
+    viewport_size: Size<i32, Logical>,
+    zoom: f64,
+) -> bool {
+    let visible_w = viewport_size.w as f64 / zoom;
+    let visible_h = viewport_size.h as f64 / zoom;
+    camera.x <= point.x
+        && point.x <= camera.x + visible_w
+        && camera.y <= point.y
+        && point.y <= camera.y + visible_h
+}
+
+/// Check whether the canvas origin (0, 0) is visible in the current viewport.
+pub fn is_origin_visible(
+    camera: Point<f64, Logical>,
+    viewport_size: Size<i32, Logical>,
+    zoom: f64,
+) -> bool {
+    is_point_visible(Point::from((0.0, 0.0)), camera, viewport_size, zoom)
+}
+
+/// A rival bookmark must be at least this fraction of the incumbent's distance
+/// to steal the active title — 10% closer. Damps flip-flop when two bookmarks
+/// sit near-equidistant from the viewport center.
+const ACTIVE_BOOKMARK_HYSTERESIS: f64 = 0.9;
+
+/// The active bookmark for one output's viewport: the visible bookmark nearest
+/// the usable-area center, with hysteresis favoring the incumbent (see
+/// `ACTIVE_BOOKMARK_HYSTERESIS`). Ties break by name (BTreeMap order); `None`
+/// when no bookmark is visible.
+///
+/// `bookmarks` are stored Y-up (user/rule/IPC convention) while the camera is
+/// internal Y-down, so each bookmark's y is negated before comparison — the
+/// same flip `go_to_canvas_point` applies. `usable_center` is the screen-space
+/// center of the usable area (panels excluded, as `SetBookmark` uses); the
+/// canvas-space target is `camera + usable_center / zoom`.
+pub fn active_bookmark(
+    bookmarks: &BTreeMap<String, [f64; 2]>,
+    camera: Point<f64, Logical>,
+    viewport_size: Size<i32, Logical>,
+    zoom: f64,
+    usable_center: Point<f64, Logical>,
+    incumbent: Option<&str>,
+) -> Option<String> {
+    let target = Point::<f64, Logical>::from((
+        camera.x + usable_center.x / zoom,
+        camera.y + usable_center.y / zoom,
+    ));
+
+    let mut best: Option<(&str, f64)> = None;
+    let mut incumbent_dist: Option<f64> = None;
+    for (name, &[x, y]) in bookmarks {
+        let point = Point::from((x, -y));
+        if !is_point_visible(point, camera, viewport_size, zoom) {
+            continue;
+        }
+        let dx = point.x - target.x;
+        let dy = point.y - target.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if incumbent == Some(name.as_str()) {
+            incumbent_dist = Some(dist);
+        }
+        if best.is_none_or(|(_, d)| dist < d) {
+            best = Some((name.as_str(), dist));
+        }
+    }
+
+    let (best_name, best_dist) = best?;
+    if let (Some(inc), Some(inc_dist)) = (incumbent, incumbent_dist) {
+        // Incumbent still visible: keep it unless a rival is decisively closer.
+        if best_name != inc && best_dist < ACTIVE_BOOKMARK_HYSTERESIS * inc_dist {
+            return Some(best_name.to_owned());
+        }
+        return Some(inc.to_owned());
+    }
+    Some(best_name.to_owned())
+}
+
+/// The canvas rectangle visible at the current camera + zoom.
+/// Used to cull windows outside the viewport for `render_elements_for_region`.
+///
+/// `camera_i32` must be `camera.to_i32_round()` — the same rounding used by
+/// `update_output_from_camera` — so that element position offsets match the
+/// output mapping used for input hit-testing.
+pub fn visible_canvas_rect(
+    camera_i32: Point<i32, Logical>,
+    viewport_size: Size<i32, Logical>,
+    zoom: f64,
+) -> Rectangle<i32, Logical> {
+    let w = (viewport_size.w as f64 / zoom).ceil() as i32 + 2;
+    let h = (viewport_size.h as f64 / zoom).ceil() as i32 + 2;
+    Rectangle::new(camera_i32, (w, h).into())
+}
+
+/// Bounding box of all windows. Returns None if the iterator is empty.
+pub fn all_windows_bbox(
+    windows: impl Iterator<Item = (Point<i32, Logical>, Size<i32, Logical>)>,
+) -> Option<Rectangle<i32, Logical>> {
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    let mut any = false;
+
+    for (loc, size) in windows {
+        any = true;
+        min_x = min_x.min(loc.x);
+        min_y = min_y.min(loc.y);
+        max_x = max_x.max(loc.x + size.w);
+        max_y = max_y.max(loc.y + size.h);
+    }
+
+    if any {
+        Some(Rectangle::new(
+            (min_x, min_y).into(),
+            (max_x - min_x, max_y - min_y).into(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Zoom level that fits `bbox` inside `viewport` with `padding` viewport pixels
+/// on each side. Padding is screen-space so the gutter stays constant regardless
+/// of the resulting zoom.
+/// Clamped to [MIN_ZOOM_FLOOR, MAX_ZOOM] — zooms out as far as needed to fit.
+pub fn zoom_to_fit(
+    bbox: Rectangle<i32, Logical>,
+    viewport_size: Size<i32, Logical>,
+    padding: f64,
+) -> f64 {
+    let avail_w = (viewport_size.w as f64 - padding * 2.0).max(1.0);
+    let avail_h = (viewport_size.h as f64 - padding * 2.0).max(1.0);
+    let zoom_x = avail_w / bbox.size.w.max(1) as f64;
+    let zoom_y = avail_h / bbox.size.h.max(1) as f64;
+    zoom_x.min(zoom_y).clamp(MIN_ZOOM_FLOOR, MAX_ZOOM)
+}
+
+/// Dynamic minimum zoom based on the current window layout.
+/// Uses a virtual 5x5 window at the origin as baseline when no windows exist,
+/// so the limit stays consistent as the first window appears.
+pub fn dynamic_min_zoom(
+    windows: impl Iterator<Item = (Point<i32, Logical>, Size<i32, Logical>)>,
+    viewport_size: Size<i32, Logical>,
+    padding: f64,
+) -> f64 {
+    let bbox =
+        all_windows_bbox(windows).unwrap_or_else(|| Rectangle::new((-2, -2).into(), (5, 5).into()));
+    // Allow zooming out to 50% beyond the fit zoom for breathing room
+    let fit = zoom_to_fit(bbox, viewport_size, padding);
+    (fit * 0.5).max(MIN_ZOOM_FLOOR)
+}
+
+/// Camera position that keeps `anchor_canvas` at `anchor_screen` after a zoom change.
+/// Derived from: screen = (canvas - camera) * zoom  ⟹  camera = canvas - screen / zoom.
+pub fn zoom_anchor_camera(
+    anchor_canvas: Point<f64, Logical>,
+    anchor_screen: Point<f64, Logical>,
+    new_zoom: f64,
+) -> Point<f64, Logical> {
+    Point::from((
+        anchor_canvas.x - anchor_screen.x / new_zoom,
+        anchor_canvas.y - anchor_screen.y / new_zoom,
+    ))
+}
+
+/// Snap zoom to 1.0 if within ±0.05 dead zone (avoids stuck-near-1.0 feel).
+pub fn snap_zoom(z: f64) -> f64 {
+    if (z - 1.0).abs() < 0.05 { 1.0 } else { z }
+}
+
+/// Closest point on an axis-aligned rect to `origin`.
+/// If origin is inside the rect, returns origin itself (distance 0).
+pub fn closest_point_on_rect(
+    origin: Point<f64, Logical>,
+    loc: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+) -> Point<f64, Logical> {
+    Point::from((
+        origin.x.clamp(loc.x as f64, (loc.x + size.w) as f64),
+        origin.y.clamp(loc.y as f64, (loc.y + size.h) as f64),
+    ))
+}
+
+/// Find the nearest item in a 90° cone from `origin` in the given direction.
+///
+/// Uses dot/cross product against the direction unit vector: a candidate is
+/// in the cone when `dot > 0 && |cross| <= dot` (i.e. within ±45° of the
+/// direction). Scores by `distance / cos(angle)` — targets aligned with the
+/// exact direction are preferred even if further away.
+///
+/// Generic over the item type so it works with `Window` in production and
+/// simple types (e.g. `&str`) in tests.
+pub fn find_nearest<W: PartialEq>(
+    origin: Point<f64, Logical>,
+    dir: &Direction,
+    items: impl Iterator<Item = (W, Point<f64, Logical>)>,
+    skip: Option<&W>,
+) -> Option<W> {
+    let (ux, uy) = dir.to_unit_vec();
+    let mut best: Option<(W, f64)> = None;
+
+    for (item, center) in items {
+        if skip.is_some_and(|s| s == &item) {
+            continue;
+        }
+        let dx = center.x - origin.x;
+        let dy = center.y - origin.y;
+        let dot = dx * ux + dy * uy;
+        let cross = (dx * uy - dy * ux).abs();
+        if dot > 0.0 && cross <= dot {
+            // score = dist² / dot ∝ dist / cos(angle), avoids sqrt
+            let dist_sq = dx * dx + dy * dy;
+            let score = dist_sq / dot;
+            if best.as_ref().is_none_or(|(_, d)| score < *d) {
+                best = Some((item, score));
+            }
+        }
+    }
+
+    best.map(|(w, _)| w)
+}
+
+/// Sliding-window velocity tracker for scroll/gesture input.
+/// Computes launch velocity from recent displacement over a fixed time window,
+/// avoiding the EMA bias where the last 1-2 events dominate.
+///
+/// Timestamps are libinput event times (ms), not processing time: under CPU
+/// load the event loop can drain a burst of events with near-identical
+/// processing times, which collapses `elapsed` and explodes the launch velocity.
+/// Event times are stamped when the input occurred, so they retain real spacing.
+#[derive(Clone, Default)]
+pub struct VelocityTracker {
+    samples: VecDeque<(u32, Point<f64, Logical>)>,
+}
+
+const VELOCITY_WINDOW_MS: u32 = 80;
+
+impl VelocityTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, time_ms: u32, delta: Point<f64, Logical>) {
+        self.samples.push_back((time_ms, delta));
+        // wrapping_sub keeps eviction correct across the u32 ms wrap (~49.7 days).
+        while self
+            .samples
+            .front()
+            .is_some_and(|(t, _)| time_ms.wrapping_sub(*t) > VELOCITY_WINDOW_MS)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Total displacement / elapsed time = px/sec. Zero if < 2 samples.
+    pub fn launch_velocity(&self) -> Point<f64, Logical> {
+        if self.samples.len() < 2 {
+            return Point::from((0.0, 0.0));
+        }
+        let first_time = self.samples.front().unwrap().0;
+        let last_time = self.samples.back().unwrap().0;
+        let elapsed_ms = last_time.wrapping_sub(first_time);
+        // Event times are ms-quantized, so a sub-ms window (only reachable by a
+        // sub-millisecond flick on a >1000Hz device) would divide by zero. Guard
+        // the clock resolution, not a device rate: any real fling spans many ms,
+        // so no device is throttled.
+        if elapsed_ms == 0 {
+            return Point::from((0.0, 0.0));
+        }
+        let elapsed = elapsed_ms as f64 / 1000.0;
+        let total: Point<f64, Logical> = self
+            .samples
+            .iter()
+            .fold(Point::from((0.0, 0.0)), |acc, (_, d)| {
+                Point::from((acc.x + d.x, acc.y + d.y))
+            });
+        Point::from((total.x / elapsed, total.y / elapsed))
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
+/// Stop threshold in px/sec (15 px/sec ≈ 0.25 px/frame at 60Hz)
+const MOMENTUM_STOP_THRESHOLD: f64 = 15.0;
+
+/// Scroll momentum physics with time-based drift.
+/// Velocity is in px/sec; drift is applied via `powf(dt * 60)` for
+/// frame-rate independence.
+#[derive(Clone)]
+pub struct MomentumState {
+    pub velocity: Point<f64, Logical>,
+    pub tracker: VelocityTracker,
+    pub drift: f64,
+    pub coasting: bool,
+}
+
+impl MomentumState {
+    pub fn new(drift: f64) -> Self {
+        Self {
+            velocity: Point::from((0.0, 0.0)),
+            tracker: VelocityTracker::new(),
+            drift,
+            coasting: false,
+        }
+    }
+
+    /// Record an input delta. Resets coasting — we're receiving live input.
+    /// `time_ms` is the libinput event timestamp, not processing time.
+    pub fn accumulate(&mut self, delta: Point<f64, Logical>, time_ms: u32) {
+        self.tracker.push(time_ms, delta);
+        self.coasting = false;
+    }
+
+    /// Snapshot launch velocity from the tracker and begin coasting.
+    pub fn launch(&mut self) {
+        self.velocity = self.tracker.launch_velocity();
+        self.coasting = true;
+        self.tracker.clear();
+    }
+
+    /// Advance momentum by `dt`. Returns Some(canvas delta) to apply, or None.
+    pub fn tick(&mut self, dt: Duration) -> Option<Point<f64, Logical>> {
+        if !self.coasting {
+            return None;
+        }
+        let speed = (self.velocity.x.powi(2) + self.velocity.y.powi(2)).sqrt();
+        if speed < MOMENTUM_STOP_THRESHOLD {
+            self.velocity = Point::from((0.0, 0.0));
+            self.coasting = false;
+            return None;
+        }
+
+        let dt_secs = dt.as_secs_f64();
+
+        // Speed-dependent drift: gentle scrolls stop quickly, fast flings coast longer
+        let effective_drift = speed_dependent_drift(self.drift, speed);
+        let decay = effective_drift.powf(dt_secs * 60.0);
+        let delta = Point::from((self.velocity.x * dt_secs, self.velocity.y * dt_secs));
+        self.velocity = Point::from((self.velocity.x * decay, self.velocity.y * decay));
+        Some(delta)
+    }
+
+    pub fn stop(&mut self) {
+        self.velocity = Point::from((0.0, 0.0));
+        self.tracker.clear();
+        self.coasting = false;
+    }
+}
+
+/// Per-frame velocity retention for momentum coasting, from the user's `drift`
+/// knob (0 = off … 1 = floatiest) and the current `speed`.
+///
+/// The knob is log-spaced in coast time: each step multiplies how long a fling
+/// coasts by a roughly constant factor, so the slider feels perceptually even
+/// instead of cramming every usable value into 0.9–1.0. Gentle scrolls (low
+/// speed) stop sooner than hard flings (high speed). The result is normalized to
+/// 60fps; `tick` applies `powf(dt * 60)` for frame-rate independence.
+fn speed_dependent_drift(drift: f64, speed: f64) -> f64 {
+    if drift <= 0.0 {
+        return 0.0; // momentum disabled
+    }
+    // Fling coast time as a velocity half-life (seconds), spaced geometrically
+    // across the knob. Endpoints and the default (0.5) are tuned so 0.5
+    // reproduces the original feel (≈0.88 slow / ≈0.965 fast retention).
+    const FLING_HALFLIFE_MIN: f64 = 0.05;
+    const FLING_HALFLIFE_MAX: f64 = 2.3;
+    const SLOW_COAST_RATIO: f64 = 0.28; // gentle scrolls coast ~1/3.6 as long
+    let fling = FLING_HALFLIFE_MIN * (FLING_HALFLIFE_MAX / FLING_HALFLIFE_MIN).powf(drift.min(1.0));
+    let reference_speed = 2500.0; // px/sec; at or above this, full fling coast
+    let t = (speed / reference_speed).min(1.0);
+    let half_life = fling * SLOW_COAST_RATIO.powf(1.0 - t);
+    // Retention that halves the velocity every `half_life` seconds.
+    0.5_f64.powf(1.0 / (60.0 * half_life)).min(0.995)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cam(x: f64, y: f64) -> Point<f64, Logical> {
+        Point::from((x, y))
+    }
+    fn vp(w: i32, h: i32) -> Size<i32, Logical> {
+        Size::from((w, h))
+    }
+
+    #[test]
+    fn rule_coords_round_trip() {
+        // internal -> rule -> internal is identity, even for odd sizes where
+        // integer halving truncates (same truncated half is used both ways).
+        for (loc, size) in [
+            ((0, 0), (100, 100)),
+            ((200, -300), (640, 480)),
+            ((-15, 7), (101, 51)),
+        ] {
+            let loc = Point::<i32, Logical>::from(loc);
+            let size = vp(size.0, size.1);
+            let (rx, ry) = internal_to_rule(loc, size);
+            assert_eq!(rule_to_internal(rx, ry, size), loc);
+        }
+    }
+
+    #[test]
+    fn rule_coords_center_y_up() {
+        assert_eq!(internal_to_rule((0, 0).into(), vp(100, 100)), (50, -50));
+    }
+
+    #[test]
+    fn content_rule_coords_round_trip() {
+        // content -> rule -> content is identity for every chrome, including
+        // odd sizes and odd chrome where the integer halving truncates.
+        for (loc, size) in [
+            ((0, 0), (100, 100)),
+            ((200, -300), (640, 480)),
+            ((-15, 7), (101, 51)),
+        ] {
+            for chrome in [
+                Chrome::NONE,
+                Chrome { bar: 25, border: 0 },
+                Chrome { bar: 0, border: 4 },
+                Chrome { bar: 25, border: 3 },
+                Chrome { bar: 7, border: 1 },
+            ] {
+                let loc = Point::<i32, Logical>::from(loc);
+                let size = vp(size.0, size.1);
+                let (rx, ry) = content_to_rule(loc, size, chrome);
+                assert_eq!(
+                    rule_to_content(rx, ry, size, chrome),
+                    loc,
+                    "{chrome:?} at {loc:?} {size:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_border_cancels_out_of_the_frame_center() {
+        let loc = Point::<i32, Logical>::from((200, -300));
+        let size = vp(640, 480);
+        let bare = content_to_rule(loc, size, Chrome { bar: 25, border: 0 });
+        for border in [1, 2, 4, 17] {
+            assert_eq!(
+                content_to_rule(loc, size, Chrome { bar: 25, border }),
+                bare,
+                "border {border} moved the center"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undecorated_window_keeps_the_bare_rule_coords() {
+        let loc = Point::<i32, Logical>::from((-15, 7));
+        let size = vp(101, 51);
+        assert_eq!(
+            content_to_rule(loc, size, Chrome::NONE),
+            internal_to_rule(loc, size)
+        );
+    }
+
+    #[test]
+    fn a_bar_lifts_the_reported_center_by_half_its_height() {
+        let loc = Point::<i32, Logical>::from((0, 0));
+        let size = vp(100, 100);
+        let (_, bare_y) = content_to_rule(loc, size, Chrome::NONE);
+        let (_, barred_y) = content_to_rule(loc, size, Chrome { bar: 24, border: 0 });
+        assert_eq!(barred_y - bare_y, 12);
+    }
+
+    #[test]
+    fn a_frame_smaller_than_its_chrome_floors_at_one_pixel() {
+        let chrome = Chrome { bar: 25, border: 4 };
+        assert_eq!(chrome.content_size(vp(4, 20)), vp(1, 1));
+        assert_eq!(
+            chrome.content_size(chrome.frame_size(vp(800, 600))),
+            vp(800, 600)
+        );
+    }
+
+    #[test]
+    fn pinned_rule_screen_round_trip() {
+        // rule coords -> screen top-left -> rule coords is identity, including
+        // odd window/output sizes where integer halving truncates (the same
+        // truncated halves cancel in both directions).
+        for (rule, size, out) in [
+            ((0, 0), (320, 240), (1920, 1080)),
+            ((200, -150), (640, 480), (1920, 1080)),
+            ((-37, 61), (101, 51), (1365, 767)),
+            ((450, 320), (100, 100), (801, 601)),
+        ] {
+            let size = vp(size.0, size.1);
+            let out = vp(out.0, out.1);
+            let screen = rule_to_screen_top_left(rule.0, rule.1, size, out);
+            assert_eq!(screen_top_left_to_rule(screen, size, out), rule);
+        }
+    }
+
+    #[test]
+    fn viewport_center_round_trip() {
+        let viewport = vp(1920, 1080);
+        for (camera, zoom) in [
+            (cam(0.0, 0.0), 1.0),
+            (cam(-960.0, -540.0), 1.0),
+            (cam(123.0, -45.0), 0.5),
+            (cam(-200.0, 300.0), 2.0),
+        ] {
+            let (x, y) = viewport_center(camera, zoom, viewport);
+            let back = camera_for_center(x, y, zoom, viewport);
+            assert!((back.x - camera.x).abs() < 1e-9 && (back.y - camera.y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn camera_for_center_centers_origin() {
+        let viewport = vp(1000, 800);
+        let camera = camera_for_center(0.0, 0.0, 1.0, viewport);
+        assert_eq!(viewport_center(camera, 1.0, viewport), (0.0, 0.0));
+    }
+
+    #[test]
+    fn fully_visible() {
+        // 100x100 window at (200, 200), camera at (0,0), viewport 1000x1000, zoom 1.0
+        let f = visible_fraction(
+            (200, 200).into(),
+            (100, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+        );
+        assert!((f - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fully_off_screen() {
+        // Window completely to the right of viewport
+        let f = visible_fraction(
+            (2000, 0).into(),
+            (100, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+        );
+        assert!((f - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn half_off_right_edge() {
+        // 100x100 window, right half off-screen
+        let f = visible_fraction(
+            (950, 0).into(),
+            (100, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+        );
+        assert!((f - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_area_window() {
+        let f = visible_fraction(
+            (0, 0).into(),
+            (0, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+        );
+        assert!((f - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_affects_viewport() {
+        // At zoom 0.5, viewport covers 2000x2000 canvas units.
+        // 100x100 window at (1500, 0) is fully visible.
+        let f = visible_fraction(
+            (1500, 0).into(),
+            (100, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            0.5,
+        );
+        assert!((f - 1.0).abs() < 1e-9);
+
+        // Same window at zoom 1.0 is fully off-screen.
+        let f = visible_fraction(
+            (1500, 0).into(),
+            (100, 100).into(),
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+        );
+        assert!((f - 0.0).abs() < 1e-9);
+    }
+
+    // -- Coordinate transform round-trip tests --
+
+    #[test]
+    fn screen_canvas_round_trip_zoom_1() {
+        let camera = cam(100.0, 200.0);
+        let original = ScreenPos(Point::from((400.0, 300.0)));
+        let canvas = screen_to_canvas(original, camera, 1.0);
+        let back = canvas_to_screen(canvas, camera, 1.0);
+        assert!((back.0.x - original.0.x).abs() < 1e-9);
+        assert!((back.0.y - original.0.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn screen_canvas_round_trip_zoomed_out() {
+        let camera = cam(-500.0, -300.0);
+        let zoom = 0.25;
+        let original = ScreenPos(Point::from((640.0, 480.0)));
+        let canvas = screen_to_canvas(original, camera, zoom);
+        let back = canvas_to_screen(canvas, camera, zoom);
+        assert!((back.0.x - original.0.x).abs() < 1e-9);
+        assert!((back.0.y - original.0.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn screen_to_canvas_math() {
+        // screen = (canvas - camera) * zoom  ⟹  canvas = screen / zoom + camera
+        let canvas = screen_to_canvas(ScreenPos(Point::from((100.0, 50.0))), cam(10.0, 20.0), 0.5);
+        // 100/0.5 + 10 = 210, 50/0.5 + 20 = 120
+        assert!((canvas.0.x - 210.0).abs() < 1e-9);
+        assert!((canvas.0.y - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn canvas_to_screen_math() {
+        // screen = (canvas - camera) * zoom
+        let screen = canvas_to_screen(CanvasPos(Point::from((210.0, 120.0))), cam(10.0, 20.0), 0.5);
+        // (210 - 10) * 0.5 = 100, (120 - 20) * 0.5 = 50
+        assert!((screen.0.x - 100.0).abs() < 1e-9);
+        assert!((screen.0.y - 50.0).abs() < 1e-9);
+    }
+
+    // -- find_nearest tests --
+
+    fn pt(x: f64, y: f64) -> Point<f64, Logical> {
+        Point::from((x, y))
+    }
+
+    #[test]
+    fn find_nearest_right() {
+        let origin = pt(0.0, 0.0);
+        let items = vec![
+            ("a", pt(100.0, 0.0)),  // directly right
+            ("b", pt(-100.0, 0.0)), // directly left
+            ("c", pt(200.0, 0.0)),  // further right
+        ];
+        let result = find_nearest(origin, &Direction::Right, items.into_iter(), None::<&&str>);
+        assert_eq!(result, Some("a"));
+    }
+
+    #[test]
+    fn find_nearest_up() {
+        let origin = pt(0.0, 0.0);
+        let items = vec![("above", pt(0.0, -100.0)), ("below", pt(0.0, 100.0))];
+        let result = find_nearest(origin, &Direction::Up, items.into_iter(), None::<&&str>);
+        assert_eq!(result, Some("above"));
+    }
+
+    #[test]
+    fn find_nearest_down() {
+        let origin = pt(0.0, 0.0);
+        let items = vec![("above", pt(0.0, -100.0)), ("below", pt(0.0, 100.0))];
+        let result = find_nearest(origin, &Direction::Down, items.into_iter(), None::<&&str>);
+        assert_eq!(result, Some("below"));
+    }
+
+    #[test]
+    fn find_nearest_left() {
+        let origin = pt(0.0, 0.0);
+        let items = vec![("left", pt(-100.0, 0.0)), ("right", pt(100.0, 0.0))];
+        let result = find_nearest(origin, &Direction::Left, items.into_iter(), None::<&&str>);
+        assert_eq!(result, Some("left"));
+    }
+
+    #[test]
+    fn find_nearest_outside_cone() {
+        // Item at 60° from the right axis — outside the 45° cone
+        let origin = pt(0.0, 0.0);
+        let items = vec![("diagonal", pt(50.0, 100.0))];
+        let result = find_nearest(origin, &Direction::Right, items.into_iter(), None::<&&str>);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_nearest_skips_self() {
+        let origin = pt(0.0, 0.0);
+        let items = vec![("self", pt(10.0, 0.0)), ("other", pt(20.0, 0.0))];
+        let result = find_nearest(origin, &Direction::Right, items.into_iter(), Some(&"self"));
+        assert_eq!(result, Some("other"));
+    }
+
+    #[test]
+    fn find_nearest_empty() {
+        let origin = pt(0.0, 0.0);
+        let items: Vec<(&str, Point<f64, Logical>)> = vec![];
+        let result = find_nearest(origin, &Direction::Right, items.into_iter(), None::<&&str>);
+        assert_eq!(result, None);
+    }
+
+    fn bookmarks(entries: &[(&str, f64, f64)]) -> BTreeMap<String, [f64; 2]> {
+        entries
+            .iter()
+            .map(|&(name, x, y)| (name.to_owned(), [x, y]))
+            .collect()
+    }
+
+    #[test]
+    fn point_visibility_inclusive_and_zoom_aware() {
+        let viewport = vp(1000, 1000);
+        // Origin at the top-left corner of the viewport (inclusive edge).
+        assert!(is_point_visible(pt(0.0, 0.0), cam(0.0, 0.0), viewport, 1.0));
+        // Just outside the right edge at zoom 1.0.
+        assert!(!is_point_visible(
+            pt(1001.0, 0.0),
+            cam(0.0, 0.0),
+            viewport,
+            1.0
+        ));
+        // At zoom 0.5 the viewport covers 2000 canvas units, so it's visible.
+        assert!(is_point_visible(
+            pt(1001.0, 0.0),
+            cam(0.0, 0.0),
+            viewport,
+            0.5
+        ));
+    }
+
+    #[test]
+    fn active_bookmark_none_when_empty() {
+        let bms = bookmarks(&[]);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(0.0, 0.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_bookmark_none_when_all_off_screen() {
+        // Bookmark Y-up (500, -600) → internal (500, 600) sits inside a
+        // 1000x1000 viewport at camera (0,0), so shift the camera away.
+        let bms = bookmarks(&[("far", 5000.0, -5000.0)]);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(0.0, 0.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_bookmark_nearest_wins() {
+        // Camera (0,0), zoom 1.0, usable center (500,500) → target internal
+        // (500, 500). "near" Y-up (450, -450) → internal (450, 450); "far"
+        // Y-up (100, -100) → internal (100, 100). "near" is closer.
+        let bms = bookmarks(&[("near", 450.0, -450.0), ("far", 100.0, -100.0)]);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(0.0, 0.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None
+            ),
+            Some("near".to_owned())
+        );
+    }
+
+    #[test]
+    fn active_bookmark_y_flip() {
+        // A bookmark at positive Y-up y matches a camera looking at negative
+        // internal y. Bookmark Y-up (0, 400) → internal (0, -400). Put it dead
+        // center by aiming the target there: camera (-500, -900), usable center
+        // (500, 500), zoom 1.0 → target internal (0, -400).
+        let bms = bookmarks(&[("up", 0.0, 400.0)]);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(-500.0, -900.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None,
+            ),
+            Some("up".to_owned())
+        );
+        // A camera looking at positive internal y (i.e. negative Y-up) must NOT
+        // see this bookmark as visible.
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(-500.0, 100.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_bookmark_hysteresis_holds_incumbent() {
+        // Two bookmarks, incumbent "a" slightly farther than rival "b" but not
+        // by >10%: incumbent keeps the title. Target internal (500, 500).
+        // "a" internal (450, 500) → dist 50; "b" internal (550, 500) → dist 50.
+        // Nudge so "b" is only ~9% closer: a at dist 55, b at dist 50.
+        let bms = bookmarks(&[("a", 445.0, -500.0), ("b", 550.0, -500.0)]);
+        let held = active_bookmark(
+            &bms,
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+            pt(500.0, 500.0),
+            Some("a"),
+        );
+        assert_eq!(held, Some("a".to_owned()));
+    }
+
+    #[test]
+    fn active_bookmark_hysteresis_yields_to_decisive_rival() {
+        // Rival "b" is >10% closer than incumbent "a": rival wins.
+        // "a" internal (300, 500) → dist 200; "b" internal (550, 500) → dist 50.
+        let bms = bookmarks(&[("a", 300.0, -500.0), ("b", 550.0, -500.0)]);
+        let flipped = active_bookmark(
+            &bms,
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+            pt(500.0, 500.0),
+            Some("a"),
+        );
+        assert_eq!(flipped, Some("b".to_owned()));
+    }
+
+    #[test]
+    fn active_bookmark_incumbent_left_rect_falls_back_to_nearest() {
+        // Incumbent "gone" is no longer visible → normal nearest-wins among the
+        // remaining candidates, no hysteresis credit for the absent incumbent.
+        let bms = bookmarks(&[("here", 450.0, -450.0)]);
+        let result = active_bookmark(
+            &bms,
+            cam(0.0, 0.0),
+            vp(1000, 1000),
+            1.0,
+            pt(500.0, 500.0),
+            Some("gone"),
+        );
+        assert_eq!(result, Some("here".to_owned()));
+    }
+
+    #[test]
+    fn active_bookmark_tie_break_by_name() {
+        // Two equidistant candidates → BTreeMap order wins ("a" before "b").
+        // Both at internal (500, 450) and (500, 550), dist 50 each.
+        let bms = bookmarks(&[("b", 500.0, -550.0), ("a", 500.0, -450.0)]);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam(0.0, 0.0),
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                None
+            ),
+            Some("a".to_owned())
+        );
+    }
+
+    #[test]
+    fn active_bookmark_midpoint_pan_does_not_flip() {
+        // Incumbent "a" and rival "b" straddle the viewport. Panning the camera
+        // toward the midpoint keeps both near-equidistant, so the incumbent
+        // holds until the rival crosses the 10% margin.
+        let bms = bookmarks(&[("a", 200.0, -500.0), ("b", 800.0, -500.0)]);
+        // Target moved slightly toward "b" (usable center → internal 520,500):
+        // a dist 320, b dist 280 → b is 12.5% closer, so it flips.
+        let cam_near_b = cam(20.0, 0.0);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam_near_b,
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                Some("a")
+            ),
+            Some("b".to_owned())
+        );
+        // A gentler pan (internal target 505,500): a dist 305, b dist 295 →
+        // only ~3% closer, incumbent holds.
+        let cam_slight = cam(5.0, 0.0);
+        assert_eq!(
+            active_bookmark(
+                &bms,
+                cam_slight,
+                vp(1000, 1000),
+                1.0,
+                pt(500.0, 500.0),
+                Some("a")
+            ),
+            Some("a".to_owned())
+        );
+    }
+
+    fn usable_rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    fn frame_rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
+        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    #[test]
+    fn coverage_is_exact_at_exact_equality() {
+        assert_eq!(
+            coverage(
+                frame_rect(0.0, 0.0, 1920.0, 1080.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::Exact
+        );
+    }
+
+    #[test]
+    fn coverage_is_overhang_when_oversize() {
+        assert_eq!(
+            coverage(
+                frame_rect(-10.0, -10.0, 1940.0, 1100.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::Overhang
+        );
+    }
+
+    #[test]
+    fn coverage_is_exact_with_negligible_float_noise() {
+        let usable = usable_rect(0, 0, 1920, 1080);
+        assert_eq!(
+            coverage(frame_rect(1e-9, 0.0, 1920.0 - 1e-9, 1080.0), usable),
+            Coverage::Exact,
+            "a hair short is still flush"
+        );
+        assert_eq!(
+            coverage(frame_rect(-1e-9, 0.0, 1920.0 + 2e-9, 1080.0), usable),
+            Coverage::Exact,
+            "a hair over is still flush"
+        );
+    }
+
+    #[test]
+    fn coverage_is_overhang_half_a_pixel_past_one_edge() {
+        assert_eq!(
+            coverage(
+                frame_rect(-0.5, 0.0, 1920.5, 1080.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::Overhang
+        );
+    }
+
+    #[test]
+    fn coverage_is_none_half_a_pixel_short_on_one_edge() {
+        // Half a pixel is a real, visible sliver (a fractional pan can leave a
+        // fill exactly this short), not float noise — must not cover.
+        assert_eq!(
+            coverage(
+                frame_rect(0.5, 0.0, 1919.5, 1080.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::None
+        );
+    }
+
+    #[test]
+    fn coverage_is_none_when_exactly_one_pixel_short_on_each_edge() {
+        let usable = usable_rect(0, 0, 1920, 1080);
+        assert_eq!(
+            coverage(frame_rect(1.0, 0.0, 1919.0, 1080.0), usable),
+            Coverage::None,
+            "left edge a pixel short"
+        );
+        assert_eq!(
+            coverage(frame_rect(0.0, 1.0, 1920.0, 1079.0), usable),
+            Coverage::None,
+            "top edge a pixel short"
+        );
+        assert_eq!(
+            coverage(frame_rect(0.0, 0.0, 1919.0, 1080.0), usable),
+            Coverage::None,
+            "right edge a pixel short"
+        );
+        assert_eq!(
+            coverage(frame_rect(0.0, 0.0, 1920.0, 1079.0), usable),
+            Coverage::None,
+            "bottom edge a pixel short"
+        );
+    }
+
+    #[test]
+    fn coverage_is_none_when_short_on_one_edge_and_past_another() {
+        // Overhang must not outrank a shortfall: a sliver of canvas still shows.
+        assert_eq!(
+            coverage(
+                frame_rect(-10.0, 0.0, 1925.0, 1080.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::None
+        );
+    }
+
+    #[test]
+    fn coverage_is_none_when_far_away() {
+        assert_eq!(
+            coverage(
+                frame_rect(5000.0, 5000.0, 1920.0, 1080.0),
+                usable_rect(0, 0, 1920, 1080)
+            ),
+            Coverage::None
+        );
+    }
+}

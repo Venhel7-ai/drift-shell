@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/drift-shell-ctl safe-reset

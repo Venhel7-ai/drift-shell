@@ -1,0 +1,11 @@
+[Unit]
+Description=Drift Shell state service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/drift-shell-ctl daemon
+Restart=on-failure
+RestartSec=2
+UMask=0077

@@ -1,0 +1,351 @@
+diff --git a/src/grabs/touch_gesture_grab.rs b/src/grabs/touch_gesture_grab.rs
+index 18eef46..d6828d1 100644
+--- a/src/grabs/touch_gesture_grab.rs
++++ b/src/grabs/touch_gesture_grab.rs
+@@ -376,7 +376,7 @@ impl TouchGestureGrab {
+     fn apply_zoom(&self, data: &mut DriftWm, scale: f64, anchor: Point<f64, Logical>) {
+         // Fullscreen locks the camera and zoom (see `set_camera_on`); a pinch
+         // that started before the fullscreen just goes inert.
+-        if data.is_output_fullscreen(&self.output) {
++        if data.is_output_fullscreen(&self.output) || data.shell_camera_locked(&self.output) {
+             return;
+         }
+         let zoom = output_state(&self.output).zoom;
+diff --git a/src/input/gestures.rs b/src/input/gestures.rs
+index c1f489d..c9fbc2c 100644
+--- a/src/input/gestures.rs
++++ b/src/input/gestures.rs
+@@ -73,7 +73,7 @@ impl DriftWm {
+     /// about which output they mean.
+     pub(super) fn gesture_output_fullscreen(&self) -> bool {
+         self.gesture_output_or_active()
+-            .is_some_and(|o| self.is_output_fullscreen(&o))
++            .is_some_and(|o| self.is_output_fullscreen(&o) || self.shell_camera_locked(&o))
+     }
+ 
+     pub(crate) fn cancel_animations(&mut self) {
+diff --git a/src/ipc/mod.rs b/src/ipc/mod.rs
+index 5893de3..4d1eff7 100644
+--- a/src/ipc/mod.rs
++++ b/src/ipc/mod.rs
+@@ -25,7 +25,7 @@ use self::protocol::{
+ 
+ /// Reject a command line longer than this (without a newline) — bounds the
+ /// per-connection buffer against a client that never terminates a command.
+-const MAX_COMMAND_SIZE: usize = 4096;
++const MAX_COMMAND_SIZE: usize = 262144;
+ 
+ /// Cap how long a reply write may block, so a stuck reader can't hang the loop.
+ const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+@@ -190,6 +190,13 @@ pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
+     }
+ 
+     match request {
++        Request::ShellCamera {
++            output,
++            center,
++            zoom,
++            anchored,
++        } => shell_camera(&output, center, zoom, anchored, state),
++        Request::ShellLayout { revision, targets } => shell_layout(revision, targets, state),
+         Request::Camera(arg) => cmd_camera(arg, state),
+         Request::Zoom(arg) => cmd_zoom(arg, state),
+         Request::Layout { short } => cmd_layout(short, state),
+@@ -218,7 +225,9 @@ pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
+ fn is_mutating(request: &Request) -> bool {
+     matches!(
+         request,
+-        Request::Camera(Some(_))
++        Request::ShellCamera { .. }
++            | Request::ShellLayout { .. }
++            | Request::Camera(Some(_))
+             | Request::Zoom(Some(_))
+             | Request::Focus(Some(_))
+             | Request::Move { to: Some(_), .. }
+@@ -1296,3 +1305,91 @@ mod tests {
+         assert_eq!(layout_code("us,", 1), None);
+     }
+ }
++
++fn shell_camera(
++    name: &str,
++    center: (f64, f64),
++    zoom: f64,
++    anchored: bool,
++    state: &mut DriftWm,
++) -> Reply {
++    if !center.0.is_finite()
++        || !center.1.is_finite()
++        || center.0.abs() > 1e8
++        || center.1.abs() > 1e8
++        || !zoom.is_finite()
++        || !(0.01..=1.0).contains(&zoom)
++    {
++        return Err("invalid shell camera".into());
++    }
++    let output = state
++        .space
++        .outputs()
++        .find(|o| o.name() == name)
++        .cloned()
++        .ok_or("unknown output")?;
++    if state.is_output_fullscreen(&output) {
++        return Err("output is fullscreen".into());
++    }
++    let camera = driftwm::canvas::camera_for_center(
++        center.0,
++        center.1,
++        zoom,
++        crate::state::output_logical_size(&output),
++    );
++    {
++        let mut os = crate::state::output_state(&output);
++        os.camera = camera;
++        os.zoom = zoom;
++        os.shell_anchored = anchored;
++        os.camera_target = None;
++        os.zoom_target = None;
++        os.zoom_animation_anchor = None;
++        os.momentum.stop();
++        os.edge_pan_velocity = None;
++        os.panning = false;
++    }
++    state.mark_all_dirty();
++    Ok(Response::Ok)
++}
++
++fn shell_layout(_revision: u64, targets: Vec<protocol::ShellTarget>, state: &mut DriftWm) -> Reply {
++    if targets.len() > 512 {
++        return Err("too many targets".into());
++    }
++    let mut ids = std::collections::HashSet::new();
++    let mut prepared = Vec::with_capacity(targets.len());
++    // Validate the complete batch before any client receives a configure.
++    // calloop cannot interleave client events between validation and commit.
++    for t in targets {
++        if !ids.insert(t.id)
++            || t.w <= 0
++            || t.h <= 0
++            || t.w > 32768
++            || t.h > 32768
++            || t.x.unsigned_abs() > 100_000_000
++            || t.y.unsigned_abs() > 100_000_000
++        {
++            return Err("invalid layout target".into());
++        }
++        let element = element_by_selector(state, Some(&WindowSelector::Id(t.id)))?;
++        if !state.is_canvas_window(&element) || state.element_under_interactive_grab(&element) {
++            return Err("window is not available for layout".into());
++        }
++        let chrome = state.reported_chrome(&element);
++        let requested = chrome.content_size(Size::from((t.w, t.h)));
++        let (w, h) =
++            crate::state::resize_constraints(&element, chrome).clamp(requested.w, requested.h);
++        if (w, h) != (requested.w, requested.h) {
++            return Err("LAYOUT_MIN_SIZE_CONFLICT".into());
++        }
++        let size = Size::from((w, h));
++        let loc = driftwm::canvas::rule_to_content(t.x, t.y, size, chrome);
++        prepared.push((element, size, loc));
++    }
++    for (element, size, loc) in prepared {
++        state.resize_element_to(&element, size, loc, false, None);
++    }
++    state.session_store_mark_dirty();
++    Ok(Response::Ok)
++}
+diff --git a/src/ipc/protocol.rs b/src/ipc/protocol.rs
+index 742fc45..b2fbab3 100644
+--- a/src/ipc/protocol.rs
++++ b/src/ipc/protocol.rs
+@@ -22,6 +22,17 @@ pub enum WindowSelector {
+ /// when `None` and write when `Some`.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum Request {
++    ShellCamera {
++        output: String,
++        center: (f64, f64),
++        zoom: f64,
++        anchored: bool,
++    },
++    ShellLayout {
++        revision: u64,
++        targets: Vec<ShellTarget>,
++    },
++
+     /// Coordinates are the viewport center, Y-up.
+     Camera(Option<(f64, f64)>),
+     /// Set value is clamped to the supported range (out to fit-all, in to native
+@@ -280,6 +291,8 @@ pub enum WindowMode {
+ /// [`WindowSelector::Id`] to target this window.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub struct WindowInfo {
++    #[serde(default)]
++    pub transient: bool,
+     pub id: u64,
+     pub app_id: String,
+     pub title: String,
+@@ -568,6 +581,7 @@ mod tests {
+             layout: "English (US)".into(),
+             layout_short: "us".into(),
+             windows: vec![WindowInfo {
++                transient: false,
+                 id: 1,
+                 app_id: "foo".into(),
+                 title: "bar".into(),
+@@ -726,3 +740,13 @@ mod tests {
+         );
+     }
+ }
++
++/// A visual-frame target in the IPC center/Y-up coordinate system.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct ShellTarget {
++    pub id: u64,
++    pub x: i32,
++    pub y: i32,
++    pub w: i32,
++    pub h: i32,
++}
+diff --git a/src/state/mod.rs b/src/state/mod.rs
+index 0508b08..48e3d6b 100644
+--- a/src/state/mod.rs
++++ b/src/state/mod.rs
+@@ -426,6 +426,7 @@ pub struct PendingView {
+ /// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
+ #[derive(Clone)]
+ pub struct OutputState {
++    pub shell_anchored: bool,
+     pub camera: Point<f64, Logical>,
+     pub zoom: f64,
+     pub zoom_target: Option<f64>,
+@@ -479,6 +480,7 @@ pub fn init_output_state(
+     }
+     output.user_data().insert_if_missing_threadsafe(|| {
+         Mutex::new(OutputState {
++            shell_anchored: false,
+             camera,
+             zoom: 1.0,
+             zoom_target: None,
+diff --git a/src/state/output.rs b/src/state/output.rs
+index 65f166a..7e59cdb 100644
+--- a/src/state/output.rs
++++ b/src/state/output.rs
+@@ -534,6 +534,7 @@ mod tests {
+         layout_position: (i32, i32),
+     ) -> OutputState {
+         OutputState {
++            shell_anchored: false,
+             camera: Point::from(camera),
+             zoom,
+             zoom_target: None,
+diff --git a/src/state/persistence.rs b/src/state/persistence.rs
+index 456fc16..0d12c75 100644
+--- a/src/state/persistence.rs
++++ b/src/state/persistence.rs
+@@ -157,6 +157,7 @@ impl DriftWm {
+                 let (rx, ry) = driftwm::canvas::content_to_rule(loc, s.size.get(), chrome);
+                 let size = chrome.frame_size(s.size.get());
+                 windows.push(WindowInfo {
++                    transient: false,
+                     id: self
+                         .stage
+                         .id_of(window)
+@@ -204,6 +205,7 @@ impl DriftWm {
+             let (rx, ry) = driftwm::canvas::content_to_rule(loc, window.geometry().size, chrome);
+             let size = chrome.frame_size(window.geometry().size);
+             windows.push(WindowInfo {
++                transient: window.parent_surface().is_some(),
+                 id: self
+                     .stage
+                     .id_of(window)
+@@ -679,6 +681,7 @@ mod tests {
+ 
+     fn win(id: u64, title: &str) -> WindowInfo {
+         WindowInfo {
++            transient: false,
+             id,
+             app_id: "app".into(),
+             title: title.into(),
+diff --git a/src/state/viewport.rs b/src/state/viewport.rs
+index 9bc4664..19df997 100644
+--- a/src/state/viewport.rs
++++ b/src/state/viewport.rs
+@@ -10,6 +10,10 @@ use driftwm::stage::StageElement;
+ use super::{DriftWm, OutputState, StageWindow, output_logical_size, output_state};
+ 
+ impl DriftWm {
++    pub fn shell_camera_locked(&self, output: &Output) -> bool {
++        output_state(output).shell_anchored
++    }
++
+     // Per-output field accessors. Getters fall back to a sensible default
+     // when no output exists; setters silently no-op. Hotplug/lid-close races
+     // briefly leave the compositor with zero outputs — must not panic then.
+@@ -43,7 +47,7 @@ impl DriftWm {
+     /// black to that output (and other cameras). (`enter_fullscreen` seeds the
+     /// origin by writing output_state directly, bypassing this guard.)
+     pub fn set_camera_on(&mut self, output: &Output, val: Point<f64, Logical>) {
+-        if self.is_output_fullscreen(output) {
++        if self.is_output_fullscreen(output) || self.shell_camera_locked(output) {
+             return;
+         }
+         output_state(output).camera = val;
+@@ -62,6 +66,7 @@ impl DriftWm {
+     pub fn set_zoom(&mut self, val: f64) {
+         if let Some(o) = self.active_output()
+             && !self.is_output_fullscreen(&o)
++            && !self.shell_camera_locked(&o)
+         {
+             output_state(&o).zoom = val;
+         }
+diff --git a/src/state/viewport_animation.rs b/src/state/viewport_animation.rs
+index d4133fd..f7bed7c 100644
+--- a/src/state/viewport_animation.rs
++++ b/src/state/viewport_animation.rs
+@@ -333,7 +333,7 @@ impl DriftWm {
+         // so it needs its own: a pan in flight when fullscreen lands goes inert
+         // rather than race that lock. `enter_fullscreen` already cleared the
+         // velocity tracker, so release banks no fling either.
+-        if self.is_output_fullscreen(output) {
++        if self.is_output_fullscreen(output) || self.shell_camera_locked(output) {
+             return Point::from((0.0, 0.0));
+         }
+         {
+@@ -409,6 +409,13 @@ impl DriftWm {
+     /// Advance the camera animation toward `camera_target` using frame-rate independent lerp.
+     /// Shifts the pointer by the camera delta so the cursor stays at the same screen position.
+     pub fn apply_camera_animation(&mut self, dt: Duration) {
++        if let Some(output) = self.active_output() {
++            if self.shell_camera_locked(&output) {
++                self.disarm_view_flight_on_fullscreen(&output);
++                return;
++            }
++        }
++
+         let Some(target) = self.camera_target() else {
+             return;
+         };
+@@ -464,6 +471,13 @@ impl DriftWm {
+     /// its screen-space anchor stable while deriving camera, preventing drift.
+     /// Otherwise just adjusts pointer so cursor stays at the same screen position.
+     pub fn apply_zoom_animation(&mut self, dt: Duration) {
++        if let Some(output) = self.active_output() {
++            if self.shell_camera_locked(&output) {
++                self.disarm_view_flight_on_fullscreen(&output);
++                return;
++            }
++        }
++
+         let Some(target) = self.zoom_target() else {
+             return;
+         };
+@@ -556,7 +570,7 @@ impl DriftWm {
+     /// than through the guarded setter, so a disarm sequenced after it would let
+     /// the zoom leave the park and draw the parked window scaled.
+     pub(crate) fn disarm_view_flight_on_fullscreen(&mut self, output: &Output) {
+-        if !self.is_output_fullscreen(output) {
++        if !self.is_output_fullscreen(output) && !self.shell_camera_locked(output) {
+             return;
+         }
+         let mut os = output_state(output);

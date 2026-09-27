@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Mesa's EGL and its software rasterizer give the pixel tests a surfaceless GL context.
+  DEPS_APT: libseat-dev libdisplay-info-dev libinput-dev libudev-dev libgbm-dev libxkbcommon-dev libwayland-dev libegl1 libegl-mesa0 libgl1-mesa-dri
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt --check
+
+  test:
+    name: build & test
+    runs-on: ubuntu-24.04
+    # Backstops the steps a step-level budget doesn't cover; the default is six
+    # hours.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          # foot is a test dependency: the real-client scenario spawns it
+          # against the in-process compositor.
+          sudo apt-get install -y ${{ env.DEPS_APT }} foot
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify Cargo.lock is in sync
+        run: cargo check --locked
+
+      - name: Build tests
+        run: cargo test --no-run
+
+      # Bounded because a deadlocked test hangs rather than fails, and a hang
+      # that trips the step budget stays legible as one.
+      - name: Run tests
+        timeout-minutes: 20
+        run: cargo test -- --include-ignored --skip soak
+
+      # The soak's fd and RSS plateaus are read from /proc/self, so a
+      # neighbouring test holding a socket open lands inside its measurement.
+      # It only means anything with the process to itself. Bounded for the same
+      # reason as the step above.
+      - name: Run soak
+        timeout-minutes: 15
+        run: cargo test --bin driftwm -- --include-ignored --test-threads=1 soak
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ${{ env.DEPS_APT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings

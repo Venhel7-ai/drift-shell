@@ -1,0 +1,6 @@
+[Unit]
+Description=Shutdown running driftwm session
+DefaultDependencies=no
+StopWhenUnneeded=yes
+Conflicts=graphical-session.target graphical-session-pre.target
+After=graphical-session.target graphical-session-pre.target

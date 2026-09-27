@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""driftwm-decal: render a transparent image as a borderless Wayland window.
+
+Pin transparent PNGs/SVGs to canvas coordinates so they sit on the dot grid,
+below all windows, off alt-tab, and pan with the canvas — hand-drawn shortcut
+sheets, logos, region labels, etc.
+
+Deps: python-gobject + gtk4  (Arch: `pacman -S python-gobject gtk4`)
+
+Usage:
+    driftwm-decal PATH [--title NAME]
+
+Each invocation is one decal window. Match it with a `widget = true` window
+rule by `--title`, then launch from `autostart` in config.toml:
+
+    # config.toml (autostart is a top-level key — keep it above the
+    # [[window_rules]] tables, or TOML parses it into the last rule)
+    autostart = [
+        "driftwm-decal ~/decals/shortcuts.svg --title shortcuts",
+        "driftwm-decal ~/decals/logo.png      --title logo",
+    ]
+
+    [[window_rules]]
+    title      = "shortcuts"
+    widget     = true          # pin to canvas, below windows, off alt-tab
+    decoration = "none"
+    position   = [1200, -400]   # canvas coords, Y-up, image center
+    size       = [420, 130]
+
+    [[window_rules]]
+    title      = "logo"
+    widget     = true
+    decoration = "none"
+    position   = [-800, 600]
+    size       = [256, 256]
+
+The transparent parts of the image show the dot grid (or your shader
+wallpaper) through. GtkPicture handles both PNG and SVG.
+"""
+import argparse
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, Gio, Gtk
+
+ap = argparse.ArgumentParser()
+ap.add_argument("image")
+ap.add_argument("--title", default="decal")
+args = ap.parse_args()
+
+
+def on_activate(app):
+    win = Gtk.ApplicationWindow(application=app)
+    win.set_title(args.title)
+    win.set_decorated(False)
+    css = Gtk.CssProvider()
+    css.load_from_data(b"window { background: transparent; }")
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER
+    )
+    win.set_child(Gtk.Picture.new_for_filename(args.image))
+    win.present()
+
+
+# NON_UNIQUE so each invocation is its own window (otherwise GTK's
+# single-instance handoff makes the 2nd call activate the 1st and exit).
+app = Gtk.Application(
+    application_id="org.driftwm.Decal", flags=Gio.ApplicationFlags.NON_UNIQUE
+)
+app.connect("activate", on_activate)
+app.run(None)

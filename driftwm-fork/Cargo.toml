@@ -1,0 +1,97 @@
+[package]
+name = "driftwm"
+version = "0.19.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+authors = ["Klim Kostiuk <2601074@gmail.com>"]
+description = "A trackpad-first infinite canvas Wayland compositor"
+repository = "https://github.com/malbiruk/driftwm"
+
+[dependencies]
+# Cargo.lock holds winit at 0.31.0-beta.2: this smithay rev does not build
+# against beta.3, which `^0.31.0-beta.2` otherwise resolves to.
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "4cf0b62028039661477d482ec4758b687d8f4392", default-features = false, features = [
+    "backend_winit",
+    "backend_udev",
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_egl",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+] }
+smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "4cf0b62028039661477d482ec4758b687d8f4392" }
+libdisplay-info = "0.3.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tiff = "0.11"
+xcursor = "0.3"
+freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+inotify = { version = "0.11", default-features = false }
+calloop = { version = "0.14", features = ["signals"] }
+drm-ffi = "0.9"
+bytemuck = { version = "1.25", features = ["derive"] }
+cosmic-text = { version = "0.17.0", features = ["shape-run-cache"] }
+sd-notify = "0.4"
+tracy-client = { version = "0.18.4", default-features = false, optional = true }
+
+[dev-dependencies]
+proptest = "1"
+insta = "1.47.2"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+calloop-wayland-source = "0.4.1"
+
+# Faster snapshot diffing in the in-process test harness (insta/similar are
+# recursion-heavy; unoptimized they dominate debug test time).
+[profile.dev.package.insta]
+opt-level = 3
+
+[profile.dev.package.similar]
+opt-level = 3
+
+[lints.clippy]
+# A guard locked in a scrutinee outlives the body — re-locking inside deadlocks
+# the event loop (see dev/docs/caveats.md).
+significant_drop_in_scrutinee = "warn"
+
+[features]
+# Enables the Tracy profiler instrumentation. Spans, plots, and frame marks
+# are no-ops without this feature, so it carries zero overhead off.
+#
+# Usage:
+#   1. Install the Tracy server GUI: https://github.com/wolfpld/tracy/releases
+#   2. cargo run --release --features profile-with-tracy
+#   3. In Tracy GUI, click "Connect" to localhost.
+profile-with-tracy = [
+    "dep:tracy-client",
+    "tracy-client/default",
+    "smithay/tracy_gpu_profiling",
+]
+# Tracy server connects on-demand instead of at startup. Use when running the
+# compositor as a long-lived process and only profiling occasionally.
+profile-with-tracy-ondemand = [
+    "profile-with-tracy",
+    "tracy-client/ondemand",
+    "tracy-client/manual-lifetime",
+]
+# Wraps the global allocator with Tracy's profiled allocator so allocations
+# show up on the timeline. Adds noticeable overhead — use only when chasing
+# allocation hotspots.
+profile-with-tracy-allocations = ["profile-with-tracy"]
+
+[profile.release]
+lto = "thin"
+debug = "line-tables-only"

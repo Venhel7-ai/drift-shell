@@ -1,0 +1,100 @@
+name: Publish to AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup
+        env:
+          SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          pacman -Sy --noconfirm --needed git openssh
+          mkdir -p /root/.ssh
+          printf '%s\n' "$SSH_KEY" > /root/.ssh/aur
+          chmod 600 /root/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> /root/.ssh/known_hosts 2>/dev/null
+          cat >> /root/.ssh/config <<EOF
+          Host aur.archlinux.org
+            User aur
+            IdentityFile /root/.ssh/aur
+            IdentitiesOnly yes
+          EOF
+          git config --global user.name "driftwm-release-bot"
+          git config --global user.email "2601074@gmail.com"
+          useradd -m builder
+          cat >> /etc/makepkg.conf <<'EOF'
+          BUILDDIR=/tmp
+          PKGDEST=/tmp
+          SRCDEST=/tmp
+          SRCPKGDEST=/tmp
+          LOGDEST=/tmp
+          EOF
+
+      - name: Publish driftwm
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git clone ssh://aur@aur.archlinux.org/driftwm.git driftwm
+          cd driftwm
+
+          sed -i -E "s|^pkgver=.*|pkgver=$VERSION|" PKGBUILD
+          sed -i -E "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
+
+          runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "driftwm: no changes"
+          else
+            git add PKGBUILD .SRCINFO
+            git commit -m "Update to v$VERSION"
+            git push
+          fi
+
+      - name: Publish driftwm-git
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          SHORT_SHA=$(git ls-remote https://github.com/malbiruk/driftwm.git "$TAG" "$TAG^{}" | tail -1 | cut -c1-7)
+          if [ -z "$SHORT_SHA" ]; then
+            echo "Could not resolve commit SHA for $TAG" >&2
+            exit 1
+          fi
+          GIT_PKGVER="$VERSION.r0.g$SHORT_SHA"
+
+          git clone ssh://aur@aur.archlinux.org/driftwm-git.git driftwm-git
+          cd driftwm-git
+
+          sed -i -E "s|^pkgver=.*|pkgver=$GIT_PKGVER|" PKGBUILD
+          sed -i -E "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
+
+          runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "driftwm-git: no changes"
+          else
+            git add PKGBUILD .SRCINFO
+            git commit -m "Update to v$VERSION"
+            git push
+          fi

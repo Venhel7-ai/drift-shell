@@ -1,0 +1,868 @@
+use smithay::{
+    input::keyboard::Layout,
+    utils::{Logical, Point, Size},
+    wayland::seat::WaylandFocus,
+};
+
+use crate::state::{DriftWm, HomeReturn, NavZoom, StageWindow};
+use driftwm::canvas::{self};
+use driftwm::config::{Action, LayoutSwitch, Modifiers, SendEvents, TrackpadState};
+use driftwm::window_ext::WindowExt;
+
+/// Use the focused window as the cone-search origin only when it's fully
+/// inside the viewport. Any clipping → search from viewport center instead
+/// (cone can still return the focused window if it's the nearest in that
+/// direction, which is useful for snapping back to a partially-visible
+/// focused window).
+const CENTER_NEAREST_ANCHOR_THRESHOLD: f64 = 1.0;
+
+impl DriftWm {
+    /// Spawn a command and reveal the cursor briefly so the launched app is
+    /// easy to find.
+    fn exec_command(&mut self, cmd: &str) {
+        tracing::info!("Spawning: {cmd}");
+        crate::state::spawn_command(cmd, &self.config.child_env);
+        let now = std::time::Instant::now();
+        self.cursor.exec_cursor_show_at = Some(now + std::time::Duration::from_millis(150));
+        self.cursor.exec_cursor_deadline = Some(now + std::time::Duration::from_secs(5));
+    }
+
+    pub fn execute_action(&mut self, action: &Action) {
+        // A non-cycle action from any input source ends an in-progress Alt-Tab
+        // cycle here, committing the selection before it runs. CycleWindows
+        // itself is exempt so stepping deeper keeps working.
+        if !matches!(action, Action::CycleWindows { .. }) && self.stage.cycle_state().is_some() {
+            self.end_cycle();
+        }
+
+        // Snapshot fullscreen window before the guard exits it. Also check
+        // pre_exited_fullscreen (set by input-layer code that exited fullscreen
+        // ahead of dispatching this action).
+        let was_fullscreen = self
+            .active_fullscreen_window()
+            .or_else(|| self.pre_exited_fullscreen.take());
+
+        // A suspend of a fullscreen window must record the windowed rect, not
+        // the fullscreen buffer the client still reports until it acks the exit
+        // configure the prelude below sends. Capture it before the exit.
+        let suspend_restore_rect = matches!(action, Action::SuspendWindow)
+            .then(|| self.focused_fullscreen_restore_rect())
+            .flatten();
+
+        if self.is_fullscreen() && !action.runs_during_fullscreen() {
+            self.exit_fullscreen();
+        }
+
+        self.with_output_state(|os| os.momentum.stop());
+        match action {
+            Action::Exec(cmd) => self.exec_command(cmd),
+            Action::ExecTerminal => self.exec_command(&detect_terminal()),
+            Action::ExecLauncher => self.exec_command(&detect_launcher()),
+            Action::Spawn(cmd) => {
+                tracing::info!("Spawning (no cursor): {cmd}");
+                crate::state::spawn_command(cmd, &self.config.child_env);
+            }
+            Action::CloseWindow => match self.focused_element() {
+                // A focused stand-in has no client to close — the close binding
+                // dismisses it instead.
+                Some(StageWindow::Suspended(s)) => self.dismiss_suspended(s.id),
+                Some(StageWindow::Client(window)) if !window.is_widget() => {
+                    // Keep `suspend_on_close` from converting a user-initiated
+                    // close into a stand-in.
+                    self.mark_real_close(&window);
+                    window.send_close();
+                }
+                _ => {}
+            },
+            Action::SuspendWindow => match self.focused_element() {
+                // Repeating the put-away gesture escalates: the second press
+                // dismisses the stand-in, mirroring a second click on its close
+                // button.
+                Some(StageWindow::Suspended(s)) => self.dismiss_suspended(s.id),
+                // `suspend_focused_window` self-resolves the client and applies
+                // stricter filters (widget / child / modal), so this stays a bare
+                // call rather than a guarded Client arm.
+                _ => self.suspend_focused_window(suspend_restore_rect),
+            },
+            Action::NudgeWindow(dir) => {
+                if let Some(element) = self.focused_element().filter(|e| self.is_canvas_window(e))
+                    && let Some(loc) = self.stage.position_of(&element)
+                {
+                    // Nudging re-anchors the window, invalidating any fill restore point.
+                    self.stage.clear_fill(&element);
+                    let step = self.config.nudge_step;
+                    let (ux, uy) = dir.to_unit_vec();
+                    let offset = (
+                        (ux * step as f64).round() as i32,
+                        (uy * step as f64).round() as i32,
+                    );
+                    let new_loc = loc + Point::from(offset);
+                    // The nudge is the window's new position.
+                    self.drop_owed_recenter(&element);
+                    self.map_window(element.clone(), new_loc, false);
+                    self.animate_element_move_from(&element, loc, None);
+                    // The element's canvas position is durable — persist the
+                    // nudge on the session-store debounce.
+                    self.session_store_mark_dirty();
+                }
+            }
+            Action::GrowWindow(dir) => self.step_resize_focused(dir, self.config.resize_step),
+            Action::ShrinkWindow(dir) => self.step_resize_focused(dir, -self.config.resize_step),
+            Action::PanViewport(dir) => {
+                let Some(zoom) = self.with_output_state(|os| {
+                    os.zoom_target = None;
+                    os.zoom_animation_anchor = None;
+                    os.overview_return = None;
+                    os.zoom
+                }) else {
+                    return;
+                };
+                let step = self.config.pan_step / zoom;
+                let (ux, uy) = dir.to_unit_vec();
+                let delta: Point<f64, smithay::utils::Logical> =
+                    Point::from((ux * step, uy * step));
+                // Repeated key actions extend the destination instead of
+                // restarting from the partially animated camera position.
+                let target = self.camera_target().unwrap_or_else(|| self.camera()) + delta;
+                self.set_camera_target(Some(target));
+            }
+            Action::CenterWindow => match self.focused_element() {
+                Some(StageWindow::Client(w)) if self.is_canvas_window(&w) => {
+                    self.navigate_to_element(
+                        &StageWindow::Client(w),
+                        NavZoom::RestoreFillElseReset,
+                    );
+                }
+                // A focused stand-in holds no seat focus, so `focused_window`
+                // never sees it — center it like any other focused element.
+                Some(StageWindow::Suspended(s)) => {
+                    self.navigate_to_element(
+                        &StageWindow::Suspended(s),
+                        NavZoom::RestoreFillElseReset,
+                    );
+                }
+                // Nothing focused, or a focused non-canvas (pinned/fullscreen)
+                // client: center the nearest canvas element to the viewport
+                // center — stand-ins included, so the user can land on one and
+                // press Enter to relaunch.
+                _ => {
+                    let center = self.viewport_center_canvas();
+                    let closest = self
+                        .stage
+                        .windows()
+                        .filter(|w| self.is_canvas_window(*w))
+                        .min_by(|a, b| {
+                            let dist = |w: &StageWindow| {
+                                let c = self.nav_center(w);
+                                let dx = c.x - center.x;
+                                let dy = c.y - center.y;
+                                dx * dx + dy * dy
+                            };
+                            dist(a).total_cmp(&dist(b))
+                        })
+                        .cloned();
+                    if let Some(elem) = closest {
+                        // Restores here too: the camera is traveling to this
+                        // window regardless, and centering a filled one is
+                        // wrong for the same reason it's wrong when focused.
+                        self.navigate_to_element(&elem, NavZoom::RestoreFillElseReset);
+                    }
+                }
+            },
+            Action::FocusCenter => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let pos = pointer.current_location();
+                // Chrome counts as part of its window, and a stand-in is
+                // centered by its own visual frame rather than the client hidden
+                // beneath it. Pinned windows live in screen space (no canvas
+                // position to center the camera on) — the walk skips them.
+                if let Some((element, _)) = self.topmost_under(pos, |_, _| true) {
+                    self.navigate_to_element(&element, NavZoom::RestoreFillElseReset);
+                }
+            }
+            Action::CenterNearest(dir) => {
+                #[derive(Clone, PartialEq)]
+                enum NavTarget {
+                    Window(StageWindow),
+                    Anchor(Point<f64, smithay::utils::Logical>),
+                }
+
+                // Focus intent, not seat focus: a focused stand-in holds no
+                // keyboard focus but anchors the search like any other element.
+                let focused = self.focused_anchor_element().filter(|e| !self.is_pinned(e));
+
+                // Anchor the directional search to the just-exited fullscreen
+                // window (wherever the restored view placed it) — otherwise the
+                // anchor falls back to a corner/offscreen spot and the swipe
+                // finds nothing.
+                let anchor = was_fullscreen.clone().map(StageWindow::Client).or_else(|| {
+                    focused.filter(|e| {
+                        self.window_visible_at_least(e, CENTER_NEAREST_ANCHOR_THRESHOLD)
+                    })
+                });
+
+                let (origin, skip) = if let Some(ref elem) = anchor {
+                    (self.nav_center(elem), Some(NavTarget::Window(elem.clone())))
+                } else {
+                    (self.viewport_center_canvas(), None)
+                };
+
+                // Candidates are every canvas element, stand-ins included, so a
+                // directional swipe can land on one and Enter relaunches it.
+                let windows = self
+                    .stage
+                    .windows()
+                    .filter(|w| self.is_canvas_window(*w))
+                    .map(|w| {
+                        let closest = self.element_closest_point(origin, w);
+                        // A directional search needs a direction vector, and a
+                        // point sitting on the origin has none.
+                        let point = if closest == origin {
+                            self.nav_center(w)
+                        } else {
+                            closest
+                        };
+                        (NavTarget::Window(w.clone()), point)
+                    });
+
+                let anchors = self
+                    .config
+                    .nav_anchors
+                    .iter()
+                    .map(|&p| (NavTarget::Anchor(p), p));
+
+                let nearest =
+                    canvas::find_nearest(origin, dir, windows.chain(anchors), skip.as_ref());
+                match nearest {
+                    Some(NavTarget::Window(elem)) => {
+                        // No fill-view restore here, unlike every other centering
+                        // path: those land at a definite zoom anyway (1.0 when
+                        // there is no view), so a restore only corrects *which*
+                        // zoom. This one deliberately preserves the user's, and a
+                        // restore would make that sticky — one filled window in a
+                        // traversal ends it zoomed out, since every later step
+                        // inherits the zoom it left behind.
+                        self.navigate_to_element(&elem, NavZoom::Keep);
+                    }
+                    Some(NavTarget::Anchor(p)) => {
+                        // Unfocus so next CenterNearest searches from viewport center (= this anchor)
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        self.set_window_focus(None, serial);
+                        self.with_output_state(|os| {
+                            os.overview_return = None;
+                            os.momentum.stop();
+                        });
+                        let vc = self.usable_center_screen();
+                        let zoom = self.zoom();
+                        self.set_camera_target(Some(Point::from((
+                            p.x - vc.x / zoom,
+                            p.y - vc.y / zoom,
+                        ))));
+                    }
+                    None => {}
+                }
+            }
+            Action::CycleWindows { backward } => {
+                // The active output's fullscreen was already exited above (not
+                // allowlisted), so any fullscreen entry the stage skips is on
+                // another output — shown only on its own monitor, never a
+                // target here.
+                let anchor = self.cycle_anchor();
+                let Some(window) = self
+                    .stage
+                    .cycle_step(*backward, anchor.as_ref())
+                    .as_ref()
+                    .and_then(|w| w.client())
+                    .cloned()
+                else {
+                    return;
+                };
+                // Mark the focus change this navigate causes as cycle-initiated so
+                // `focus_changed` freezes the history instead of committing.
+                self.cycle_navigating = true;
+                self.navigate_to_window(&window, NavZoom::Keep);
+                self.cycle_navigating = false;
+                // A truly modifier-less fire (gesture, bare wheel, IPC) has no key
+                // release to end the session, so each fire is a single step with a
+                // fresh anchor and commits now. If any real modifier is physically
+                // held (alt+tab, mod+wheel with any mod_key), keep the session: the
+                // modifier's release is a keyboard event and the keyboard check
+                // commits then, so a session still can't dangle. Lock states
+                // (num_lock, caps_lock) are ignored — `from_state` reads only the
+                // real modifiers, so a num_lock-on keyboard still commits.
+                let mods = self.seat.get_keyboard().unwrap().modifier_state();
+                if Modifiers::from_state(&mods).is_empty() {
+                    self.end_cycle();
+                }
+            }
+            Action::HomeToggle => {
+                let viewport_size = self.get_viewport_size();
+                let zoom = self.zoom();
+                let camera = self.camera();
+
+                // At home means zoom ≈ 1.0 AND origin visible
+                let at_home = (zoom - 1.0).abs() < 0.01
+                    && canvas::is_origin_visible(camera, viewport_size, zoom);
+
+                if at_home {
+                    // We're at home — return to saved position
+                    let ret = self.with_output_state(|os| os.home_return.take()).flatten();
+                    if let Some(ret) = ret {
+                        let can_fullscreen = ret
+                            .fullscreen_window
+                            .as_ref()
+                            .is_some_and(|w| self.stage.contains(w));
+                        if can_fullscreen {
+                            // Set camera/zoom directly — enter_fullscreen locks the viewport
+                            self.set_camera(ret.camera);
+                            self.set_zoom(ret.zoom);
+                            let window = ret.fullscreen_window.as_ref().unwrap();
+                            self.enter_fullscreen(window, None);
+                            // The camera arrived in one frame, so the window
+                            // does too, instead of growing into a viewport it
+                            // is already filling.
+                            self.cancel_window_animation(window);
+                        } else {
+                            let vc = self.usable_center_screen();
+                            self.set_zoom_animation_anchor(
+                                Point::from((
+                                    ret.camera.x + vc.x / ret.zoom,
+                                    ret.camera.y + vc.y / ret.zoom,
+                                )),
+                                vc,
+                            );
+                            self.set_camera_target(Some(ret.camera));
+                            self.set_zoom_target(Some(ret.zoom));
+                        }
+                    }
+                } else {
+                    // Not at home — save current position+zoom and go home at zoom=1.0
+                    self.with_output_state(|os| {
+                        os.home_return = Some(HomeReturn {
+                            camera,
+                            zoom,
+                            fullscreen_window: was_fullscreen.clone(),
+                        });
+                    });
+                    self.set_overview_return(None);
+                    let vc = self.usable_center_screen();
+                    let home = Point::from((-vc.x, -vc.y));
+                    if let Some(window) = &was_fullscreen {
+                        // Snap instantly — matches the instant return path and
+                        // avoids animation warps that misplace the cursor.
+                        // Whatever exited fullscreen to get here also armed a
+                        // leg back toward the view this snap is leaving, so
+                        // cancel it and let the window come along instead of
+                        // shrinking into a stale viewport.
+                        self.cancel_window_animation(window);
+                        self.set_camera(home);
+                        self.set_zoom(1.0);
+                        self.update_output_from_camera();
+                        self.warp_pointer(Point::from((0.0, 0.0)));
+                    } else {
+                        self.set_zoom_animation_anchor(Point::from((0.0, 0.0)), vc);
+                        self.set_camera_target(Some(home));
+                        self.set_zoom_target(Some(1.0));
+                    }
+                }
+            }
+            Action::GoToBookmark(name) => match self.bookmarks.get(name) {
+                Some(&[x, y]) => self.go_to_canvas_point(x, y),
+                None => {
+                    tracing::info!("no bookmark named '{name}' — set it with set-bookmark")
+                }
+            },
+            Action::SetBookmark(name) => {
+                let vc = self.usable_center_screen();
+                let zoom = self.zoom();
+                // Capture the destination of an in-flight animation, not a
+                // mid-flight frame, so set → go-to-bookmark round-trips exactly.
+                // This is the exact inverse of `go_to_canvas_point`'s camera math.
+                let cam = self.camera_target().unwrap_or_else(|| self.camera());
+                let x = cam.x + vc.x / zoom;
+                let y = -(cam.y + vc.y / zoom);
+                self.bookmarks.insert(name.clone(), [x, y]);
+                self.session_store_mark_dirty();
+            }
+            Action::MoveToBookmark(name) => {
+                let Some(&[x, y]) = self.bookmarks.get(name) else {
+                    tracing::info!("no bookmark named '{name}' — set it with set-bookmark");
+                    return;
+                };
+                let (rx, ry) = (x.round() as i32, y.round() as i32);
+                match self.focused_element().filter(|e| !e.is_widget()) {
+                    Some(StageWindow::Client(window)) => {
+                        // Pinned/fullscreen windows live in screen space — no
+                        // canvas position to move (same rule as `msg move`).
+                        // Early return here (not a match guard), so the log
+                        // still fires before bailing.
+                        if !self.is_canvas_window(&window) {
+                            tracing::info!(
+                                "cannot move a pinned or fullscreen window to a bookmark"
+                            );
+                            return;
+                        }
+                        // The prelude may have just exited fullscreen on this
+                        // window, and a fit or fill exit can be settling too; the
+                        // shared placement re-aims what that exit still owes.
+                        self.map_window_to_rule_point(&window, rx, ry, true);
+                        // The new canvas position is durable — persist the move
+                        // on the session-store debounce, like the stand-in arm.
+                        self.session_store_mark_dirty();
+                    }
+                    Some(StageWindow::Suspended(s)) => {
+                        // No live client — move the focused suspended stand-in in
+                        // place, the durable path `msg move` uses for a stand-in.
+                        let element = StageWindow::Suspended(s.clone());
+                        let loc =
+                            canvas::rule_to_content(rx, ry, s.size.get(), self.suspended_chrome());
+                        self.stage.set_position(&element, loc);
+                        self.session_store_mark_dirty();
+                    }
+                    None => {}
+                }
+            }
+            Action::ZoomIn => {
+                let new_zoom = (self.zoom() * self.config.zoom_step).min(canvas::MAX_ZOOM);
+                let new_zoom = canvas::snap_zoom(new_zoom);
+                self.zoom_to_anchored(new_zoom);
+            }
+            Action::ZoomOut => {
+                let new_zoom = (self.zoom() / self.config.zoom_step).max(self.min_zoom());
+                let new_zoom = canvas::snap_zoom(new_zoom);
+                self.zoom_to_anchored(new_zoom);
+            }
+            Action::ZoomReset => {
+                self.zoom_to_anchored(1.0);
+            }
+            Action::ZoomToFit => {
+                if self.try_restore_overview() {
+                    // toggled back
+                } else {
+                    let windows = self
+                        .stage
+                        .windows()
+                        .filter(|w| self.is_canvas_window(*w))
+                        .map(|w| {
+                            let loc = self.stage.position_of(w).unwrap_or_default();
+                            let size = w.geometry().size;
+                            (loc, size)
+                        });
+                    let anchors = self
+                        .config
+                        .nav_anchors
+                        .iter()
+                        .map(|p| (Point::from((p.x as i32, p.y as i32)), Size::from((0, 0))));
+                    if let Some(bbox) = canvas::all_windows_bbox(windows.chain(anchors)) {
+                        self.fit_to_bbox(bbox);
+                    }
+                }
+            }
+            Action::ZoomToFitSnapped => {
+                if self.try_restore_overview() {
+                    // toggled back
+                } else if let Some(focused) =
+                    self.focused_element().filter(|e| self.is_canvas_window(e))
+                {
+                    let rects = self.all_windows_with_snap_rects();
+                    // StageWindow's Hash/Eq are pointer identity — stable despite
+                    // interior mutability. Same allow as cluster_snapshot.rs.
+                    #[allow(clippy::mutable_key_type)]
+                    let cluster = driftwm::layout::cluster::cluster_of(
+                        &focused,
+                        &rects,
+                        self.config.snap_gap,
+                    );
+                    // Suspended stand-ins in the cluster are fit alongside the
+                    // live members.
+                    let members = self
+                        .stage
+                        .windows()
+                        .filter(|w| cluster.contains(*w))
+                        .map(|w| {
+                            let loc = self.stage.position_of(w).unwrap_or_default();
+                            let size = w.geometry().size;
+                            (loc, size)
+                        });
+                    if let Some(bbox) = canvas::all_windows_bbox(members) {
+                        self.fit_to_bbox(bbox);
+                    }
+                }
+            }
+            Action::ToggleFullscreen => {
+                let focused = self.focused_window().filter(|w| !w.is_widget());
+                if was_fullscreen.is_some() && !self.is_fullscreen() {
+                    // Input-layer code exited the active output's fullscreen
+                    // before this ran — the toggle is done; don't re-enter or
+                    // reach into another output's fullscreen.
+                } else if let Some(output) = focused
+                    .as_ref()
+                    .and_then(|w| w.wl_surface())
+                    .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                {
+                    // Toggle the focused window, not the active output: Mod+F
+                    // exits a fullscreen window wherever it lives — keyboard focus
+                    // can be on it while the pointer is on another monitor, where
+                    // `is_fullscreen()` (active output) reads false.
+                    self.exit_fullscreen_on(&output);
+                } else if self.is_fullscreen() {
+                    // The focused window isn't fullscreen (focus on a layer, a
+                    // windowed window, or nothing) but the active output is.
+                    self.exit_fullscreen();
+                } else if let Some(window) = focused {
+                    let target = window
+                        .wl_surface()
+                        .and_then(|s| self.resolve_fullscreen_output(&s, None));
+                    self.enter_fullscreen(&window, target);
+                }
+            }
+            Action::FitWindow => {
+                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
+                    self.toggle_fit_window(&window);
+                }
+            }
+            Action::FitWindowSnapped => {
+                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
+                    self.toggle_fit_window_snapped(&window);
+                }
+            }
+            Action::FillWindow => {
+                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
+                    self.toggle_fill_window(&window);
+                }
+            }
+            Action::SendToOutput(dir) => {
+                let Some(element) = self.focused_element().filter(|e| !e.is_widget()) else {
+                    return;
+                };
+
+                // Fullscreen and pinned are structurally client-only concepts,
+                // resolved and dispatched in screen space; the plain-canvas tail
+                // below serves a plain client and a suspended stand-in alike.
+                if let StageWindow::Client(window) = &element {
+                    if self.is_window_fullscreen(window) {
+                        // A fullscreen window is parked at its output's camera
+                        // origin, so the geometric output_for_window can
+                        // mis-resolve it to another monitor whose independent
+                        // camera shows the same canvas region — resolve it from
+                        // the fullscreen entry instead.
+                        let Some(from_output) = window
+                            .wl_surface()
+                            .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                        else {
+                            return;
+                        };
+                        let Some(target_output) = self.output_in_direction(&from_output, dir)
+                        else {
+                            return;
+                        };
+                        // enter_fullscreen tears down the old output's fullscreen
+                        // (restoring its camera/zoom and any suspended pin) and
+                        // sets focus itself.
+                        self.enter_fullscreen(window, Some(target_output));
+                        // The window is fullscreen on both sides of this, so it
+                        // lands at the target's size rather than replaying an
+                        // entry out of a windowed rect it never returned to.
+                        self.cancel_window_animation(window);
+                        return;
+                    }
+                    if self.is_pinned(window) {
+                        let Some(from_output) = self.output_for_window(&element) else {
+                            return;
+                        };
+                        let Some(target_output) = self.output_in_direction(&from_output, dir)
+                        else {
+                            return;
+                        };
+                        // Pinned windows live outside the MRU history and are
+                        // already focused.
+                        self.send_pinned_to_output(window, &target_output);
+                        return;
+                    }
+                }
+
+                let Some(from_output) = self.output_for_window(&element) else {
+                    return;
+                };
+                let Some(target_output) = self.output_in_direction(&from_output, dir) else {
+                    return;
+                };
+                // Nothing navigates after this, so the window has to land where a
+                // navigation would have parked it: on the target output's
+                // `focus_placement` point, at the zoom that output is already at.
+                // Centering here instead would disagree with where a fresh spawn
+                // lands on that same monitor.
+                let (target_cam, target_zoom) = {
+                    let os = crate::state::output_state(&target_output);
+                    (os.camera, os.zoom)
+                };
+                let geo = element.geometry();
+                let chrome = self.element_chrome(&element);
+                let align = self.align_point_on(&target_output, chrome, geo.size, target_zoom);
+                // A border is symmetric and cancels out of a center; only the bar
+                // shifts it.
+                let bar_f = chrome.bar as f64;
+                let center_x = target_cam.x + align.x / target_zoom;
+                let center_y = target_cam.y + bar_f / 2.0 + align.y / target_zoom;
+                let new_loc = Point::from((
+                    (center_x - geo.size.w as f64 / 2.0) as i32,
+                    (center_y - geo.size.h as f64 / 2.0) as i32,
+                ));
+                // Relocating to another output re-anchors the element,
+                // invalidating any fill restore point.
+                self.stage.clear_fill(&element);
+                self.map_window(element.clone(), new_loc, true);
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.raise_and_focus_element(&element, serial);
+                // The element's canvas position is durable — persist the move on
+                // the session-store debounce.
+                self.session_store_mark_dirty();
+            }
+            Action::SendCursorToOutput(dir) => {
+                // The cursor's output (active_output), not keyboard focus or
+                // focus_follows_mouse: absolute devices stay pinned to it.
+                let Some(from_output) = self.active_output() else {
+                    return;
+                };
+                let Some(target_output) = self.output_in_direction(&from_output, dir) else {
+                    return;
+                };
+
+                // Center of the target output's usable area in canvas coords,
+                // excluding layer-shell exclusive zones (panels). Deliberately
+                // the true center, not the focus_placement point send-to-output
+                // and the new-window seed aim at: the cursor lands in the middle
+                // of what the monitor shows, not on whichever edge windows park
+                // against.
+                let (target_cam, target_zoom) = {
+                    let os = crate::state::output_state(&target_output);
+                    (os.camera, os.zoom)
+                };
+                let target_vc = crate::state::usable_center_for_output(&target_output);
+                let target_canvas = Point::<f64, Logical>::from((
+                    target_cam.x + target_vc.x / target_zoom,
+                    target_cam.y + target_vc.y / target_zoom,
+                ));
+
+                self.warp_pointer(target_canvas);
+                // Match what the pointer-motion handler does on real cursor
+                // moves so the next action (center-nearest, focus, etc.) targets
+                // the new output even though no real motion event happened.
+                self.focused_output = Some(target_output);
+            }
+            Action::SwitchLayout(target) => {
+                // with_xkb_state broadcasts the layout/modifier change to the
+                // focused client on exit, so the app sees the new layout too.
+                let keyboard = self.seat.get_keyboard().unwrap();
+                let name = keyboard.with_xkb_state(self, |mut ctx| {
+                    match target {
+                        LayoutSwitch::Next => ctx.cycle_next_layout(),
+                        LayoutSwitch::Prev => ctx.cycle_prev_layout(),
+                        LayoutSwitch::Index(i) => {
+                            let count = ctx.xkb().lock().unwrap().layouts().count();
+                            if *i < count {
+                                ctx.set_layout(Layout(*i as u32));
+                            } else {
+                                tracing::warn!(
+                                    "switch-layout: index {i} out of range ({count} layouts)"
+                                );
+                            }
+                        }
+                    }
+                    let xkb = ctx.xkb().lock().unwrap();
+                    xkb.layout_name(xkb.active_layout()).to_owned()
+                });
+                self.active_layout = name;
+            }
+            Action::TogglePinToScreen => {
+                self.toggle_pin_to_screen();
+            }
+            Action::ReloadConfig => {
+                self.reload_config();
+            }
+            Action::ToggleCursorPan => {
+                self.cursor_edge_pan = !self.cursor_edge_pan;
+                if !self.cursor_edge_pan {
+                    // Stop any in-progress pan immediately.
+                    let outputs: Vec<_> = self.space.outputs().cloned().collect();
+                    for o in outputs {
+                        self.clear_edge_pan(&o);
+                    }
+                }
+            }
+            Action::SetTrackpad(state) => self.set_trackpad(state),
+            Action::Quit => {
+                tracing::info!("Quit action triggered — stopping compositor");
+                // Same reason the signal handler does it: this arrives over IPC
+                // too, so it can share a batch with the client disconnects of a
+                // session manager tearing everything down at once.
+                self.session_store_cancel_debounce();
+                self.loop_signal.stop();
+            }
+        }
+    }
+
+    /// Jump the camera so the viewport centers on canvas point `(x, y)` (Y-up),
+    /// panel-aware (`usable_center_screen`). `SetBookmark` captures the exact
+    /// inverse, so set → go-to-bookmark round-trips. Zoom is untouched.
+    fn go_to_canvas_point(&mut self, x: f64, y: f64) {
+        let vc = self.usable_center_screen();
+        let zoom = self.zoom();
+        let target_camera = Point::from((x - vc.x / zoom, -y - vc.y / zoom));
+        self.set_overview_return(None);
+        self.set_camera_target(Some(target_camera));
+    }
+
+    /// Toggle screen-pinning of the focused window. Pin/unpin keeps the window
+    /// in the same on-screen position (no visual jump) and survives reload
+    /// (state lives on the stage, not the rules).
+    fn toggle_pin_to_screen(&mut self) {
+        // Focus can linger on another output's fullscreen window (the guard in
+        // execute_action only exits the active output's); pinning it would mix
+        // two screen-space modes on one window.
+        let Some(window) = self
+            .focused_window()
+            .filter(|w| !self.is_window_fullscreen(w))
+        else {
+            return;
+        };
+        if self.stage.pin_of(&window).is_some() {
+            self.unpin_window(&window, true);
+        } else {
+            // A window with no output to pin to stays as it was; the keybinding
+            // has no one to tell.
+            let _ = self.pin_window(&window);
+        }
+    }
+
+    /// Override `[input.trackpad]`'s send-events mode for the rest of the
+    /// session and push it to every connected trackpad. Tracking the intent
+    /// rather than each device's current mode keeps two trackpads from drifting
+    /// apart under one keybinding, and lets a hotplugged one come up in the
+    /// state the user last asked for.
+    fn set_trackpad(&mut self, state: &TrackpadState) {
+        let target = match state {
+            TrackpadState::On => SendEvents::Enabled,
+            TrackpadState::Off => SendEvents::Disabled,
+            // Only a true Disabled toggles back on. From
+            // DisabledOnExternalMouse the trackpad is live whenever no mouse
+            // is attached, so a press means "off" — with a mouse attached
+            // that first press is a no-op and it takes two to reach on.
+            // libinput reports the configured mode, not whether it's
+            // suppressed right now, so intent-tracking can't do better.
+            TrackpadState::Toggle => match self.effective_send_events() {
+                SendEvents::Disabled => SendEvents::Enabled,
+                _ => SendEvents::Disabled,
+            },
+        };
+        self.trackpad_send_events = Some(target);
+        self.apply_trackpad_send_events();
+    }
+
+    /// If an overview-return is pending, animate back to it and return true.
+    fn try_restore_overview(&mut self) -> bool {
+        let Some((saved_camera, saved_zoom)) = self.overview_return() else {
+            return false;
+        };
+        self.set_overview_return(None);
+        let vc = self.usable_center_screen();
+        self.set_zoom_animation_anchor(
+            Point::from((
+                saved_camera.x + vc.x / saved_zoom,
+                saved_camera.y + vc.y / saved_zoom,
+            )),
+            vc,
+        );
+        self.set_camera_target(Some(saved_camera));
+        self.set_zoom_target(Some(saved_zoom));
+        true
+    }
+
+    /// Animate zoom + camera to fit `bbox` inside the viewport. Saves the
+    /// current camera/zoom into `overview_return` so the next zoom-to-fit
+    /// press toggles back.
+    fn fit_to_bbox(&mut self, bbox: smithay::utils::Rectangle<i32, smithay::utils::Logical>) {
+        let usable = self.get_usable_area();
+        let vc = self.usable_center_screen();
+        let fit_zoom = canvas::zoom_to_fit(bbox, usable.size, self.config.zoom_fit_padding);
+        let bbox_cx = bbox.loc.x as f64 + bbox.size.w as f64 / 2.0;
+        let bbox_cy = bbox.loc.y as f64 + bbox.size.h as f64 / 2.0;
+        let new_camera: Point<f64, smithay::utils::Logical> =
+            Point::from((bbox_cx - vc.x / fit_zoom, bbox_cy - vc.y / fit_zoom));
+        self.set_overview_return(Some((self.camera(), self.zoom())));
+        self.set_zoom_animation_anchor(Point::from((bbox_cx, bbox_cy)), vc);
+        self.set_camera_target(Some(new_camera));
+        self.set_zoom_target(Some(fit_zoom));
+    }
+
+    /// Animate zoom to `target_zoom`, anchored on viewport center (for keyboard actions).
+    pub(crate) fn zoom_to_anchored(&mut self, target_zoom: f64) {
+        self.set_overview_return(None);
+        let vc = self.usable_center_screen();
+        let camera = self.camera();
+        let zoom = self.zoom();
+        let vc_canvas = Point::from((camera.x + vc.x / zoom, camera.y + vc.y / zoom));
+        let new_camera = canvas::zoom_anchor_camera(vc_canvas, vc, target_zoom);
+        self.set_zoom_animation_anchor(vc_canvas, vc);
+        self.set_zoom_target(Some(target_zoom));
+        self.set_camera_target(Some(new_camera));
+    }
+}
+
+fn which(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// `$TERMINAL`, else the first installed of a preference list, else `foot`.
+fn detect_terminal() -> String {
+    if let Ok(term) = std::env::var("TERMINAL")
+        && !term.is_empty()
+    {
+        return term;
+    }
+    for cmd in [
+        "foot",
+        "alacritty",
+        "ptyxis",
+        "kitty",
+        "wezterm",
+        "gnome-terminal",
+        "konsole",
+    ] {
+        if which(cmd) {
+            return cmd.to_string();
+        }
+    }
+    "foot".to_string()
+}
+
+/// `$LAUNCHER`, else the first installed of a preference list, else `fuzzel`.
+/// Detection probes only the binary; the returned string carries drun-mode
+/// flags so bare menus actually launch apps.
+fn detect_launcher() -> String {
+    if let Ok(launcher) = std::env::var("LAUNCHER")
+        && !launcher.is_empty()
+    {
+        return launcher;
+    }
+    for cmd in [
+        "fuzzel",
+        "wofi --show drun",
+        "rofi -show drun",
+        "bemenu-run",
+        "wmenu-run",
+        "tofi-drun",
+        "mew-run",
+    ] {
+        let bin = cmd.split_whitespace().next().unwrap();
+        if which(bin) {
+            return cmd.to_string();
+        }
+    }
+    "fuzzel".to_string()
+}

@@ -1,0 +1,988 @@
+# # driftwm configuration
+
+# # This file documents every built-in default.
+# #
+# # A "# key = value" line is an active default — uncomment it (drop the
+# # leading "# ") to override that value. Lines beginning with "# #" are
+# # descriptions and examples, never active config; values under a
+# # "# # Example:" heading are illustrative alternatives, not defaults.
+# #
+# # To customize: copy to ~/.config/driftwm/config.toml and edit only the
+# # lines you want to change. Missing fields use built-in defaults.
+# # For bindings, use `= "none"` to remove a default entirely.
+# # Validate with: driftwm --check-config
+
+# ## General
+# # Window manager modifier key: "super" (default), "alt", or "mod3".
+# # Nothing occupies mod3 by default — remap a key onto it in your keymap first.
+# mod_key = "super"
+
+# # Sloppy focus: keyboard focus follows the pointer to windows.
+# # Moving to empty canvas keeps focus; click empty canvas to unfocus.
+# focus_follows_mouse = false
+
+# # Where new windows spawn when no window rule positions them:
+# #   "center"           — under the focus_placement point (the viewport center
+# #                        unless you changed it); camera animates to the new
+# #                        window.
+# #   "cursor"           — centered on the cursor (clamped to the active output's
+# #                        usable area); camera stays put unless zoomed out and
+# #                        zoom.reset_on_new_window is true.
+# #   "auto"             — snap-place adjacent to a cluster already in view:
+# #                        try the anchor's edges (clockwise from the one
+# #                        nearest the viewport center), then BFS to neighbors.
+# #                        The anchor is the focused window while it's visible
+# #                        enough, otherwise the nearest element in view
+# #                        (suspended stand-ins included). Falls back to
+# #                        "center" when nothing suitable is in view, when you
+# #                        clicked empty canvas to clear focus, or when no valid
+# #                        placement was found.
+# window_placement = "center"
+
+# # Where a centering navigation parks the focused window in the viewport. One of
+# # "center" (default), "top", "bottom", "left", "right", "top-left",
+# # "top-right", "bottom-left", "bottom-right". Handy on a widescreen, where
+# # centering wastes both flanks, or a vertical panel, where it wastes both ends.
+# #
+# # An edge or corner puts the window's title bar / content edge snap.outer_gap
+# # in from the usable area (border outside) — the same edge fit-window and
+# # fill-window produce, so a placed window and a filled one line up. The inset
+# # is canvas px, so it shrinks as you zoom out: 12.0 renders as 4.8 screen px
+# # at zoom 0.4.
+# #
+# # A window too big to fit on an axis with its two gutters centers on that axis
+# # rather than hanging off screen; the other axis still places, so a tall window
+# # under "top-left" still goes left.
+# #
+# # It applies wherever the camera actually moves to a window — center-window,
+# # focus-center, center-nearest, Alt-Tab, click-to-navigate, activation, a newly
+# # mapped window, the window focus follows when one closes (see
+# # auto_navigate_on_close) and `driftwm msg focus`. Focusing a window that is
+# # already fully on screen doesn't pan at all, so this places windows on
+# # centering navigations rather than holding one against the edge
+# # continuously. Fullscreen, pinned and fit windows lock or
+# # fill the viewport and ignore it, as does a filled window returning to the
+# # view it was filled in.
+# #
+# # Because the spawn point follows it too (see window_placement above), this
+# # also shifts where a new window lands on the *canvas* — the position
+# # `msg move` reports and the session file stores. Under window_placement =
+# # "auto" that only applies to the fallback: a spawn that finds a slot next to
+# # the anchor still goes there.
+# #
+# # Overridable per monitor — see the Outputs section.
+# focus_placement = "center"
+
+# # Commands to run at startup (after WAYLAND_DISPLAY is set).
+# # Each entry is passed to sh -c, so full shell syntax works (pipes, &&, env vars).
+# autostart = []
+# #
+# # Running driftwm as a systemd session (via driftwm-session / a display manager)
+# # also launches XDG autostart entries (~/.config/autostart, /etc/xdg/autostart),
+# # in addition to the autostart list above. To opt out:
+# #   systemctl --user mask xdg-desktop-autostart.target
+# # Example:
+# # autostart = ["waybar", "swaync"]
+
+[session]
+# # Persist your canvas across restarts. Suspended windows are always saved to
+# # ~/.local/state/driftwm/session.json; these flags control the rest.
+
+# # Suspend instead of close when a window is closed by the client
+# # (titlebar X, in-app quit). close-window bindings, `msg close`, and
+# # taskbar closes still close for real. Per-window overridable via a
+# # `suspend_on_close` window rule. Whether windows that were still open at a
+# # logout come back is governed by [session].restore_windows, not by this
+# # flag. See docs/session.md.
+# suspend_on_close = false
+
+# # Restore still-open windows after a restart: windows that resolve to a
+# # .desktop entry are saved as you go and come back as suspended windows on
+# # the next launch (nothing auto-launches). Per-window overridable
+# # via a `restore_windows` window rule. See docs/session.md.
+# restore_windows = false
+
+# # Restore each output's camera position and zoom from the saved session on
+# # the next launch; without it a fresh start centers every output.
+# # Read at launch: a mid-session change applies on the next launch.
+# restore_camera = false
+
+# # Restore the bookmark registry from the saved session on the next launch,
+# # overlaying saved bookmarks on the [navigation.bookmarks] config seeds;
+# # without it runtime set-bookmark / `msg bookmark` edits don't survive a
+# # restart. Read at launch: a mid-session change applies on the next launch.
+# restore_bookmarks = false
+
+[env]
+# # Environment variables set before any clients launch.
+# # Child processes (autostart, exec bindings) inherit these.
+# # These override the compositor's built-in toolkit defaults
+# # (MOZ_ENABLE_WAYLAND, QT_QPA_PLATFORM, SDL_VIDEODRIVER, GDK_BACKEND, ELECTRON_OZONE_PLATFORM_HINT).
+# # Example:
+# # QT_WAYLAND_DISABLE_WINDOWDECORATION = "1"
+# # MOZ_ENABLE_WAYLAND = "1"
+
+[input.keyboard]
+# layout = "us"              # XKB layout (e.g., "us,ru" for multi-layout)
+# remember_layout_per_window = false  # for multi-layout setups
+# variant = ""               # XKB variant (e.g., "dvorak", or "," for two defaults)
+# options = ""               # XKB options (e.g., "grp:win_space_toggle" for Super+Space layout switch)
+                             #   grp:alt_shift_toggle/grp:ctrl_shift_toggle break those chord bindings — use a tap binding (see [keybindings]) instead
+# model = ""                 # XKB model (e.g., "pc105")
+# repeat_rate = 25           # keys/sec
+# repeat_delay = 200         # ms before repeat starts
+# layout_independent = true  # match bindings by physical key position across layouts
+# num_lock = true            # num lock state on startup
+# caps_lock = false          # caps lock state on startup
+
+[input.trackpad]
+# tap_to_click = true         # enable tap-to-click
+# natural_scroll = true       # reverse scroll direction (content follows fingers)
+# tap_and_drag = true         # double-tap-hold to drag
+# accel_speed = 0.0           # pointer acceleration (-1.0 to 1.0)
+# accel_profile = "adaptive"  # "flat" or "adaptive"
+# click_method = "none"       # none = device default; clickfinger = finger count (1=left, 2=right, 3=middle); button_areas = position on trackpad
+# disable_while_typing = true  # ignore trackpad input shortly after a key press (palm rejection)
+# enable = true               # false turns the trackpad off entirely. A set-trackpad press
+                              # overrides this until the compositor restarts, or until a
+                              # saved config changes the resulting on/off state.
+# disable_on_external_mouse = false  # turn the trackpad off while an external mouse is connected
+
+[input.mouse]
+# accel_speed = 0.0           # pointer acceleration (-1.0 to 1.0)
+# accel_profile = "flat"      # "flat" or "adaptive"
+# natural_scroll = false      # reverse scroll direction
+# left_handed = false         # swap left/right mouse buttons (skipped on devices without left-handed support)
+
+[input.touch]
+# # Touchscreen hardware. Gesture thresholds and bindings live in [touch].
+# enable = true               # enable touchscreen support
+# map_to_output = "none"      # pin touch to an output by connector name;
+                              # "none" (default) auto-detects the touchscreen by
+                              # physical size + connector. Only set this to tell
+                              # apart two identically-sized touchscreens.
+# # Example:
+# # map_to_output = "DP-2"
+
+[input.tablet]
+# # Output name (e.g. "eDP-1") this tablet maps to. If unset, the tablet
+# # output is auto-detected based on libinput tags, physical size matching
+# # against the output, or falling back to the internal panel.
+# map_to_output = "none"
+
+[cursor]
+# theme = "none"             # XCURSOR_THEME; "none" = inherit from environment (e.g. "Adwaita")
+# size = 0                    # XCURSOR_SIZE; 0 = inherit from environment (e.g. 24)
+# inactive_opacity = 0.5      # cursor opacity on non-active outputs (0.0–1.0)
+
+[navigation]
+# trackpad_speed = 1.5        # trackpad (scroll/gestures) pan multiplier (1.0 = direct, 0 = off)
+# mouse_speed = 1.0           # mouse (drag) pan multiplier (1.0 = direct, 0 = off)
+# touch_speed = 1.0           # touchscreen gesture pan multiplier (1.0 = direct, 0 = off)
+# drift = 0.5                 # momentum coast: 0 = off, 0.5 = default, 1 = floatiest
+# camera_speed = 0.3          # camera lerp factor, 0-1 (higher = faster, 1 = instant)
+# auto_navigate_on_close = true  # on close, pan to the newly focused window if off-screen
+                              # false = camera stays put; focus only moves to a visible window
+# auto_navigate_on_click = false  # completed click on a partially off-screen window also pans it in
+                              # fully visible → focus only
+# nudge_step = 20             # px per nudge-window action (mod-shift-arrow by default)
+# resize_step = 20            # px per grow-window/shrink-window action (both unbound by default; does not affect drag-resize)
+# pan_step = 100.0            # px per pan-viewport action (mod-ctrl-arrow by default)
+# # Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow)
+# # even when no window is there. Uses Y-up coordinate system. Empty by default.
+# anchors = []
+# # Example: origin + 4 corners
+# # anchors = [[0, 0], [-1750, 1750], [1750, 1750], [1750, -1750], [-1750, -1750]]
+
+# [navigation.bookmarks]
+# # Named canvas points for the go-to-bookmark / set-bookmark / move-to-bookmark
+# # actions and `driftwm msg bookmark`. Uses Y-up coordinates (same convention
+# # as window rules). This table only SEEDS the
+# # runtime registry at startup — set-bookmark and the IPC verb update it live.
+# # An explicitly empty table (just the header, no keys) disables the default
+# # seeds. Runtime edits persist across restarts only with the [session]
+# # restore_bookmarks flag. A bookmark stores a canvas position, not a zoom level.
+# "1" = [-1750, 1750]
+# "2" = [1750, 1750]
+# "3" = [1750, -1750]
+# "4" = [-1750, -1750]
+
+[navigation.edge_pan]
+# zone = 100.0                # activation zone width (px from viewport edge)
+# speed_min = 4.0             # px/frame at zone boundary
+# speed_max = 10.0            # px/frame at viewport edge
+# cursor_pan = false          # pan when the bare cursor touches a screen edge
+                              # (not just while dragging). Toggle: "toggle-cursor-pan".
+# cursor_zone = 20.0          # cursor edge-pan activation zone (px).
+                              # Pans at a constant speed_max within the zone (steady,
+                              # push-speed independent); speed_min is unused here.
+# latency_ms = 120            # delay before pan starts at an edge bordering
+                              # another monitor (ms). Outer edges remain
+                              # immediate. 0 disables.
+
+[zoom]
+# step = 1.1                  # multiplier per keypress (1.1 = 10% per press)
+# trackpad_speed = 1.0        # trackpad pinch-zoom multiplier (1.0 = direct, 0 = off)
+# mouse_speed = 1.0           # mouse-wheel zoom multiplier (1.0 = direct, 0 = off)
+# touch_speed = 1.0           # touchscreen gesture zoom multiplier (1.0 = direct, 0 = off)
+# fit_padding = 80.0          # viewport px padding for zoom-to-fit (screen space)
+# reset_on_new_window = true  # animate zoom to 1.0 when a new window is mapped
+                              # (false = keep current zoom, pan only)
+# reset_on_activation = true  # animate zoom to 1.0 when an off-screen window
+                              # requests focus
+                              # (false = keep current zoom, pan only)
+# interact_min = 0.0          # zoom (1.0 = 100%) below which a window is too
+                              # small to touch: left click navigates to it per
+                              # focus_placement (a filled window returns to its
+                              # fill view instead, if that view is itself above
+                              # the threshold), drag anywhere moves it, pointer
+                              # input is suppressed.
+                              # 0 disables. Note the reachable minimum zoom is
+                              # dynamic (fit * 0.5), so with few windows a low
+                              # threshold can be unreachable and thus inert.
+
+[snap]
+# enabled = true               # magnetic edge snapping during window drag
+# gap = 12.0                   # spacing kept between windows, in canvas px —
+                               # snapping, auto placement, clusters, and
+                               # fill-window's clearance from its neighbours
+# outer_gap = 0.0              # inset from the usable area's edge to a window's
+                               # title bar or content edge (border outside), in
+                               # canvas px — fit-window, fill-window and
+                               # focus_placement measure it; 0 is edge to edge
+# distance = 24.0              # activation threshold (screen px from edge)
+# break_force = 32.0           # screen px past snap to break free
+# corners = false              # also align corners (parallel edges line up: top-to-top, left-to-left)
+# centers = false              # also align centers (midpoints line up along the moved axis)
+
+[decorations]
+# bg_color = "#303030"           # title bar background
+# fg_color = "#FFFFFF"           # title text + close button × color
+# corner_radius = 10             # clip window corners to this radius; off while
+                                 # the window covers the output's usable area
+# shadow = true                  # drop shadow under window chrome; off while the
+                                 # window covers the output's usable area
+
+# # SSD title bar text. The font is resolved via fontconfig — install the
+# # `adwaita-fonts` package for the default look; otherwise a generic sans is
+# # substituted.
+# title_bar_height = 25          # SSD title bar height in px
+# font = "Adwaita Sans"          # title text font family
+# font_size = 11                 # title text size in points
+# font_weight = "medium"         # thin/extralight/light/regular/medium/
+                                 # semibold/bold/extrabold/black
+# title_align = "center"         # "left" or "center". "center" centers short
+                                 # titles and left-aligns + ellipsizes long ones
+
+# # Decoration mode for windows without a rule:
+# #   "client"  — CSD: client draws its own titlebar (default)
+# #   "minimal" — SSD: no titlebar; shadow, corners, and border still apply via [decorations] + per-window rules
+# #   "none"    — bare client surface: compositor adds zero chrome; per-window border/corner/shadow rules are ignored
+# # "server" (driftwm titlebar) is available per-window via [[window_rules]], not as a global default:
+# # many toolkits (GTK, Electron) ignore xdg-decoration and draw CSD anyway, giving a double titlebar.
+# default_mode = "client"
+
+# # Borders apply to "client", "server", and "minimal" modes. "none" mode has
+# # no border unless one is set per-app in [[window_rules]].
+# border_width = 0               # px; 0 disables the border; not drawn while it
+                                 # hangs outside the usable area
+# border_color = "#303030"       # unfocused border
+# border_color_focused = "#303030"  # focused border. Same default as above —
+                                    # set this to a different color to get a
+                                    # focus indicator.
+
+# # Focus-dependent opacity for windows that carry no `opacity` of their own.
+# # A window rule `opacity` or `driftwm msg opacity` pins a window at one value
+# # in both focus states and opts it out of these defaults. Fullscreen windows
+# # and widgets stay opaque unless pinned. With an animated [background], any
+# # translucent window forces a full recomposite each frame — under a global
+# # dim, that is every unfocused window.
+# opacity = 1.0                  # unfocused windows
+# opacity_focused = 1.0          # focused windows
+
+# # Frost the backdrop of every window whose rules never set `blur` — the same
+# # per-window cost and caching as the rule, on every window. A rule
+# # `blur = true` still wins per window; fullscreen windows and layer-shell
+# # surfaces are left alone.
+# blur = false
+# # Example: dim + frost
+# # opacity = 0.85
+# # blur = true
+
+[effects]
+# blur_radius = 2                # number of Kawase down+up passes
+# blur_strength = 1.1            # per-pass texel spread
+# animate_blur_fps = 20          # cap (0-144) on how often the frost re-samples a background
+                                 # that moves on its own — an animated (`u_time`) shader, or a
+                                 # wallpaper daemon's surface. 0 = never re-sample that motion,
+                                 # so the frost keeps whatever the background looked like when
+                                 # it was captured. Only that motion is capped: panning,
+                                 # zooming, and swapping the background itself (a new wallpaper,
+                                 # a restarted daemon) always refresh, 0 included.
+# animation_speed = 0.5          # window open/close/move/resize lerp factor (higher = faster; 1 = instant)
+# animation_scale = 0.95         # open/close grow/shrink amplitude (1 = fade only)
+
+[background]
+# # Five types: "default" (built-in dot-grid — the default), "shader", "tile",
+# # "wallpaper", "none". For shader/tile/wallpaper, `path` is the source.
+# type = "default"
+# # Example:
+# # type = "shader"  # procedural GLSL (scrolls with canvas)
+# # path = "/usr/local/share/driftwm/wallpapers/animated/fast_smoke.glsl"
+# #
+# # type = "tile"  # image tiled across the canvas
+# # path = "~/Pictures/Wallpapers/tile.png"
+# #
+# # type = "wallpaper"  # single image fixed to viewport (does not scroll/zoom)
+# # path = "~/Pictures/Wallpapers/wallpaper.jpg"
+# #
+# # type = "none"  # render no built-in background (path ignored), so a
+# #                # wlr-layer-shell wallpaper daemon (swaybg, swww, mpvpaper for live video)
+# #                # is the wallpaper. Launch it yourself; see docs/shaders.md.
+
+# # A "shader" can also sample an image via `texture` (bound to the shader's
+# # `tex` sampler) — a procedural effect *on* your image. See docs/shaders.md.
+# # Example: shader sampling an image
+# # type = "shader"
+# # path = "/usr/local/share/driftwm/wallpapers/textured/ripple.glsl"
+# # texture = "~/Pictures/Wallpapers/photo.jpg"
+
+# # tile mode only: mirror-fold the image (2×2 reflected block) so a non-seamless
+# # image's edges always meet a reflection — no visible tile seams. Also gives a
+# # kaleidoscope/symmetry look. No-op for other background types. Single images
+# # only; gigapixel pyramidal TIFFs aren't mirrored (pre-mirror the source).
+# mirror_tile = false
+
+# # Bake a heavy static shader to a texture once and pan that, instead of
+# # recomputing it every frame. Only for shaders that slide rigidly with the
+# # camera; animated (u_time) and zoom-dependent (u_zoom) ones always render live.
+# cache_shader = false
+# # Honor a shader's output alpha so transparent pixels reveal whatever sits
+# # below the background — e.g. a wlr-layer-shell Background surface from an
+# # external wallpaper engine. Forces the shader onto the live path, so
+# # cache_shader has no effect while this is on. Image backgrounds ignore it:
+# # tile/wallpaper PNGs with an alpha channel become see-through automatically.
+# # See docs/shaders.md.
+# transparent_shader = false
+# # Memory ceiling (MB) shared by cache_shader and gigapixel-TIFF wallpapers,
+# # with LRU eviction. Raise it for sharper revisits on large / HiDPI displays;
+# # lower it on memory-constrained machines (too low just keeps the background
+# # blurrier).
+# cache_budget_mb = 128
+
+# # Frame-rate cap (0-1000) for animated (`u_time`) shader backgrounds. 0 = every
+# # output frame. Slow-moving shaders look identical well below the refresh
+# # rate; between ticks the compositor reuses the composited result instead of
+# # re-evaluating the shader, so this directly scales the background's GPU cost.
+# animate_fps = 0
+
+[bindings]
+# # Opt out of built-in default bindings by category, for a clean slate.
+# # Normally your [keybindings]/[mouse]/[gestures]/[touch] entries merge with
+# # the built-ins (use `= "none"` to drop a single default). Listing a category
+# # here removes ALL of that category's defaults, leaving only your own entries.
+# # Categories: "keys", "mouse", "gestures", "touch".
+# disable_defaults = []
+# # Example: bring your own keyboard scheme, keep mouse + gesture + touch defaults
+# # disable_defaults = ["keys"]
+
+[keybindings]
+# # Keyboard bindings: "Modifier+...+Keysym" = "action [arg]"
+# # Merges with defaults. Use "none" to unbind a default binding.
+# # "mod" expands to mod_key. Literal modifiers: alt, super (alias logo),
+# # ctrl (alias control), shift, mod3.
+# # Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc.
+# # A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
+# #
+# # Actions:
+# #   exec <cmd>              — launch an app (shows loading cursor until window appears, exits fullscreen)
+# #   exec-terminal           — launch the auto-detected terminal (see [keybindings] below; override with $TERMINAL)
+# #   exec-launcher           — launch the auto-detected app launcher (see [keybindings] below; override with $LAUNCHER)
+# #   spawn <cmd>             — run a command without loading cursor and exiting fullscreen (toggles, OSD, screenshots)
+# #   close-window            — close the focused window
+# #   suspend-window          — close the focused window but leave a suspended window in its place (Enter/click relaunches; needs a .desktop entry); on an already-suspended window, dismisses it
+# #   nudge-window <dir>      — move focused window by nudge_step px
+# #   grow-window <dir>       — grow focused window by resize_step px, moving its `<dir>` edge outward; the opposite edge stays put
+# #   shrink-window <dir>     — shrink focused window by resize_step px, pulling its `<dir>` edge inward; the opposite edge stays put
+# #   pan-viewport <dir>      — pan camera by pan_step px
+# #   center-window           — bring the focused window to the focus_placement point + reset zoom; a window still filled returns to the camera + zoom it was filled in instead
+# #   focus-center            — focus the window under the pointer and bring it there too + reset zoom; same fill exception
+# #   center-nearest <dir>    — navigate to nearest window in direction; a window target lands on the focus_placement point, a navigation.anchors target still centers
+# #   cycle-windows forward   — Alt-Tab style window cycling
+# #   cycle-windows backward  — reverse cycle
+# #   home-toggle             — toggle between current position and origin
+# #   zoom-in                 — step zoom in
+# #   zoom-out                — step zoom out
+# #   zoom-reset              — zoom to 1.0
+# #   go-to-bookmark <name>   — jump the camera to a saved bookmark
+# #   set-bookmark <name>     — save the current camera center as a bookmark (create or overwrite)
+# #   move-to-bookmark <name> — move the focused window's center to a bookmark point
+# #   zoom-to-fit             — fit all windows in viewport
+# #   zoom-to-fit-snapped     — fit only the focused window's snap cluster
+# #   toggle-fullscreen       — toggle focused window fullscreen
+# #   fit-window              — toggle maximize: centers + resets zoom + fills viewport; restore only resizes back
+# #   fit-window-snapped      — fit-window for the focused window's whole snap cluster
+# #   fill-window             — grow in place to fill free space, up to snap.outer_gap from the usable area's edge and snap.gap from a neighbour; edges past those pull back; clears maximize; press again to restore
+# #   toggle-pin-to-screen    — pin/unpin the focused window to the screen (ignores pan/zoom, floats above)
+# #   reload-config           — hot-reload config file
+# #   toggle-cursor-pan       — toggle cursor edge-pan (see [navigation.edge_pan])
+# #   set-trackpad on|off|toggle — enable/disable every trackpad for the rest of the session (see [input.trackpad] enable)
+# #   quit                    — exit the compositor
+# #   send-to-output <dir>    — move focused window to adjacent output
+# #   send-cursor-to-output <dir>  — move the cursor to adjacent output
+# #   switch-layout <target>  — cycle keyboard layout: next, prev (or previous), or a 0-based index
+# #   none                    — unbind this key combo
+# #
+# # Directions: up, down, left, right, up-left, up-right, down-left, down-right
+# "mod+return" = "exec-terminal"   # $TERMINAL, else first of: foot, alacritty, ptyxis, kitty, wezterm, gnome-terminal, konsole
+# "mod+d" = "exec-launcher"        # $LAUNCHER, else first of: fuzzel, wofi, rofi, bemenu-run, wmenu-run, tofi-drun, mew-run
+# "mod+q" = "close-window"
+# "mod+e" = "toggle-cursor-pan"     # toggle cursor edge-pan (see [navigation.edge_pan])
+# "mod+f" = "toggle-fullscreen"
+# "mod+m" = "fit-window"
+# "mod+shift+m" = "fit-window-snapped"
+# "mod+t" = "toggle-pin-to-screen"
+# "mod+c" = "center-window"
+# "mod+x" = "focus-center"
+# "mod+a" = "home-toggle"
+# "mod+up" = "center-nearest up"
+# "mod+down" = "center-nearest down"
+# "mod+left" = "center-nearest left"
+# "mod+right" = "center-nearest right"
+# "mod+shift+up" = "nudge-window up"
+# "mod+shift+down" = "nudge-window down"
+# "mod+shift+left" = "nudge-window left"
+# "mod+shift+right" = "nudge-window right"
+# "mod+ctrl+up" = "pan-viewport up"
+# "mod+ctrl+down" = "pan-viewport down"
+# "mod+ctrl+left" = "pan-viewport left"
+# "mod+ctrl+right" = "pan-viewport right"
+# "alt+tab" = "cycle-windows forward"
+# "alt+shift+tab" = "cycle-windows backward"
+# "mod+equal" = "zoom-in"
+# "mod+minus" = "zoom-out"
+# "mod+0" = "zoom-reset"
+# "mod+z" = "zoom-reset"
+# "mod+w" = "zoom-to-fit"
+# "mod+shift+w" = "zoom-to-fit-snapped"
+# "mod+1" = "go-to-bookmark 1"     # jump to bookmark 1 (top-left corner by default)
+# "mod+2" = "go-to-bookmark 2"     # jump to bookmark 2 (top-right corner)
+# "mod+3" = "go-to-bookmark 3"     # jump to bookmark 3 (bottom-right corner)
+# "mod+4" = "go-to-bookmark 4"     # jump to bookmark 4 (bottom-left corner)
+# "mod+shift+1" = "set-bookmark 1"  # overwrite bookmark 1 at the current view
+# "mod+shift+2" = "set-bookmark 2"
+# "mod+shift+3" = "set-bookmark 3"
+# "mod+shift+4" = "set-bookmark 4"
+# "mod+alt+up" = "send-to-output up"        # move window to output above
+# "mod+alt+down" = "send-to-output down"
+# "mod+alt+left" = "send-to-output left"
+# "mod+alt+right" = "send-to-output right"
+# "mod+l" = "spawn swaylock -f -c 000000 -kl"
+# "mod+ctrl+shift+q" = "quit"
+# "XF86AudioRaiseVolume" = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
+# "XF86AudioLowerVolume" = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+# "XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+# "XF86MonBrightnessUp" = "spawn brightnessctl set +5%"
+# "XF86MonBrightnessDown" = "spawn brightnessctl set 5%-"
+# "XF86AudioPlay" = "spawn playerctl play-pause"
+# "XF86AudioPause" = "spawn playerctl play-pause"
+# "XF86AudioNext" = "spawn playerctl next"
+# "XF86AudioPrev" = "spawn playerctl previous"
+# "XF86AudioStop" = "spawn playerctl stop"
+# "Print" = "spawn grim - | wl-copy"
+# "shift+Print" = "spawn grim -g \"$(slurp -d)\" - | wl-copy"
+# # Example: built-in window capture (isolated window + shadow) to clipboard
+# # "ctrl+Print" = "spawn driftwm msg screenshot window -o - | wl-copy"
+# # Example: tap binding — bare modifier chord, fires on release with no key on top
+# # "alt+shift" = "switch-layout next"
+# # Example: fill-window (unbound by default)
+# # "mod+g" = "fill-window"
+# # Example: suspend-window (unbound by default)
+# # "mod+s" = "suspend-window"
+# # Example: set-trackpad (unbound by default)
+# # "mod+f10" = "set-trackpad toggle"   # flip the trackpad between on and off
+# # "mod+shift+f10" = "set-trackpad off"   # turn it off whatever the current state
+# # Example: keyboard resize (unbound by default) — both drive the right edge, one pushing it out and one pulling it in, by resize_step px
+# # "mod+ctrl+shift+right" = "grow-window right"
+# # "mod+ctrl+shift+left" = "shrink-window right"
+
+[mouse]
+# # When true (default), dragging a window's edge or corner resizes it via the
+# # invisible resize border (SSD frame or CSD margin). Set false to make that
+# # border inert — resize only through explicit bindings (e.g. alt+right) or
+# # gestures. The band stays part of the window either way: pointer focus and
+# # on-window bindings still apply over it, so it never reads as empty canvas.
+# resize_on_border = true
+
+# # When true, resizing a window by dragging its edge (SSD or CSD border)
+# # propagates to every window connected to it via snap adjacency.
+# # Only that drag: the grow-window/shrink-window keybindings and the resize
+# # gesture always size the one window. Bind `resize-window-snapped` to a mouse
+# # button, gesture, or touch trigger for a cluster-aware drag of your own.
+# decoration_resize_snapped = false
+
+# # When true, maximize/unmaximize initiated via window decoration (CSD maximize
+# # button, SSD title-bar double-click, or xdg/foreign-toplevel set_maximized)
+# # propagates to every window connected via snap adjacency.
+# # Keybinding/gesture fit is unaffected — bind `fit-window-snapped` explicitly
+# # if you want cluster-aware fit there too.
+# decoration_fit_snapped = false
+
+# # Mouse bindings: "Modifier+...+Trigger" = "action"
+# # Context-aware: on-window, on-canvas, anywhere.
+# # Specific context checked first, then "anywhere" as fallback.
+# # Click-to-focus and SSD decoration clicks are always hardcoded.
+# # Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll,
+# # wheel-up, wheel-down. The wheel-up/wheel-down triggers fire once per
+# # discrete wheel notch and can run any action, e.g. volume on mod+shift+scroll.
+# # Merges with defaults. Use "none" to unbind.
+# #
+# # Mouse actions:
+# #   move-window             — drag the focused window
+# #   move-snapped-windows    — drag the window plus every window connected via snap adjacency
+# #   resize-window           — drag-resize the focused window
+# #   resize-window-snapped   — drag-resize, propagating to the snap cluster
+# #   pan-viewport            — drag or scroll to pan the camera
+# #   zoom                    — drag or scroll to zoom
+# #   center-nearest          — navigate toward the drag direction
+# #
+# # Any action from the [keybindings] Actions list also works on button and
+# # wheel-up/wheel-down triggers: `exec <cmd>`, close-window, toggle-fullscreen, etc.
+
+[mouse.on-window]
+# "alt+left" = "move-window"
+# "alt+shift+left" = "move-snapped-windows"
+# "alt+right" = "resize-window"
+# "alt+shift+right" = "resize-window-snapped"
+# "alt+middle" = "fit-window"
+# "alt+shift+middle" = "fit-window-snapped"
+# "mod+middle" = "toggle-fullscreen"
+
+[mouse.on-canvas]
+# "left" = "pan-viewport"            # unmodified left-click on empty canvas → pan
+# "trackpad-scroll" = "pan-viewport" # trackpad scroll on empty canvas → pan
+# "wheel-scroll" = "zoom"            # mouse wheel on empty canvas → zoom
+
+[mouse.anywhere]
+# "mod+left" = "pan-viewport"
+# "mod+ctrl+left" = "center-nearest" # direction from drag delta
+# "mod+trackpad-scroll" = "pan-viewport"
+# "mod+wheel-scroll" = "zoom"
+
+[gestures]
+# # Trackpad gesture thresholds — tune for your touchpad size.
+# # These three keys also exist under [touch] for the touchscreen, where
+# # swipe_threshold is measured in millimetres — the values are not
+# # interchangeable between the two sections.
+# swipe_threshold = 12.0        # px cumulative distance before directional swipe fires
+# pinch_in_threshold = 0.85     # scale below which pinch-in fires (1.0 = no pinch)
+# pinch_out_threshold = 1.15    # scale above which pinch-out fires (1.0 = no pinch)
+
+# # Gesture bindings: `"Modifier+N-finger-<type>" = "action"`
+# # Context-aware: on-window, on-canvas, anywhere.
+# # Unbound gestures are forwarded to the focused app.
+# # "none" unbinds.
+# #
+# # Gesture types (2–5 fingers):
+# #   N-finger-swipe            — continuous OR threshold (action determines behavior)
+# #   N-finger-swipe-up/down/left/right — threshold only, physical finger direction
+# #   3-finger-doubletap-swipe  — continuous only (window grabs; 3-finger tap then swipe)
+# #   N-finger-pinch            — continuous only (use pinch-in/out for discrete)
+# #   N-finger-pinch-in/out     — threshold only
+# #   N-finger-hold             — threshold only (fires on release)
+# #
+# # Continuous actions, locked to their triggers:
+# #   pan-viewport            — swipe
+# #   zoom                    — pinch
+# #   move-window             — swipe or doubletap-swipe
+# #   move-snapped-windows    — swipe or doubletap-swipe
+# #   resize-window           — swipe or doubletap-swipe
+# #   resize-window-snapped   — swipe or doubletap-swipe
+# #
+# # Threshold actions: any action from the [keybindings] Actions list.
+# # center-nearest may also be bound bare — its direction is the pan direction of
+# # the swipe (fingers left looks right), unlike the named per-direction triggers
+# # above which are physical (swipe triggers only).
+
+[gestures.on-window]
+# "alt+3-finger-swipe" = "resize-window"
+# "alt+shift+3-finger-swipe" = "resize-window-snapped"
+# "3-finger-doubletap-swipe" = "move-window"
+# "alt+2-finger-pinch-in" = "fit-window"
+# "alt+2-finger-pinch-out" = "fit-window"
+# "alt+shift+2-finger-pinch-in" = "fit-window-snapped"
+# "alt+shift+2-finger-pinch-out" = "fit-window-snapped"
+# "alt+3-finger-pinch-in" = "toggle-fullscreen"
+# "alt+3-finger-pinch-out" = "toggle-fullscreen"
+
+[gestures.on-canvas]
+# "2-finger-pinch" = "zoom"
+
+[gestures.anywhere]
+# "3-finger-swipe" = "pan-viewport"         # continuous (per-frame dx/dy)
+# "4-finger-swipe" = "center-nearest"       # threshold (accumulate, detect direction, fire once)
+# "mod+3-finger-swipe" = "center-nearest"   # mod makes 3-finger swipe navigate too
+# # Example: per-direction overrides (threshold only)
+# # "4-finger-swipe-up" = "exec brightnessctl set +5%"
+# # "4-finger-swipe-down" = "exec brightnessctl set 5%-"
+# # "4-finger-swipe-right" = "cycle-windows forward"
+# # "4-finger-swipe-left" = "cycle-windows backward"
+# "mod+2-finger-pinch" = "zoom"             # mod overrides app forwarding
+# "3-finger-pinch" = "zoom"                 # continuous
+# "4-finger-pinch-in" = "zoom-to-fit"       # threshold
+# "mod+4-finger-pinch-in" = "zoom-to-fit-snapped"
+# "4-finger-pinch-out" = "home-toggle"      # threshold
+# "mod+3-finger-pinch-in" = "zoom-to-fit"
+# "mod+3-finger-pinch-out" = "home-toggle"
+# "4-finger-hold" = "center-window"         # fires on release
+# "mod+3-finger-hold" = "center-window"
+
+[touch]
+# # Touchscreen gesture thresholds. Touchscreen hardware (enable, output
+# # mapping) is configured under [input.touch] instead.
+# #
+# # These three keys share their names with [gestures], but the values are not
+# # interchangeable: swipe_threshold is in millimetres here and in px there. A
+# # touchscreen is a display, so swipe travel is physical — the millimetre value
+# # is converted to px through the panel's pixel density.
+# #
+# # swipe_threshold must be positive; 0 or less falls back to the default with a
+# # warning.
+# swipe_threshold = 15.0        # mm cumulative distance before directional swipe fires
+# pinch_in_threshold = 0.85     # scale below which pinch-in fires (1.0 = no pinch)
+# pinch_out_threshold = 1.15    # scale above which pinch-out fires (1.0 = no pinch)
+
+# # Tap and hold timings. Raise them if gestures need a deliberate, unhurried
+# # touch; lower them if the panel feels sluggish to respond. Every single tap
+# # waits out double_tap_time before firing — lower it for snappier taps, at the
+# # cost of needing faster double-taps.
+# tap_time = 250                # ms a tap may last; lift later and no tap fires
+# double_tap_time = 300         # ms window for a second tap to pair into a
+                                # double-tap — and the delay a single tap's
+                                # action waits out before it fires
+# hold_time = 350               # ms of dwell before a drag commits as a hold
+                                # gesture (hold-swipe, doubletap-hold-swipe)
+                                # instead of a plain swipe
+# tap_travel = 2.0              # mm a contact may drift and still count as a
+                                # tap; past this it becomes a pan or drag
+
+# # Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers)
+# # Context-aware: on-window, on-canvas, anywhere.
+# # Unbound gestures are forwarded to the focused app.
+# # "none" removes a binding in its context. A fully unbound gesture forwards to the app.
+# #
+# # Touch gesture types (1–5 fingers):
+# #   N-finger-swipe            — continuous OR threshold (action determines behavior)
+# #   N-finger-swipe-up/down/left/right — threshold only, physical finger direction
+# #   N-finger-pinch            — continuous only (use pinch-in/out for discrete)
+# #   N-finger-pinch-in/out     — threshold only
+# #   N-finger-tap              — threshold only (quick touch, no movement)
+# #   N-finger-doubletap        — threshold only (two quick taps)
+# #   N-finger-doubletap-swipe  — continuous only (tap then drag)
+# #   N-finger-doubletap-hold-swipe  — continuous only (tap, hold, then drag)
+# #   N-finger-hold-swipe       — continuous only (dwell then drag)
+# #
+# # Continuous and threshold actions: the same sets and rules as under [gestures].
+
+[touch.on-window]
+# # 1–2 fingers starting on a window forward to the app, and the 3+ finger
+# # pan/zoom/navigate gestures are bound "anywhere" so they apply over windows
+# # too. The window-targeted gestures live here: they act on the window the
+# # fingers land on (a gesture starting on empty canvas just pans).
+# "3-finger-doubletap" = "fit-window"
+# "3-finger-doubletap-swipe" = "move-window"  # continuous
+# "3-finger-hold-swipe" = "resize-window"     # continuous (dwell then drag)
+# "3-finger-doubletap-hold-swipe" = "move-snapped-windows"  # continuous (tap, hold, then drag — moves the whole snap cluster)
+
+[touch.on-canvas]
+# "1-finger-swipe" = "pan-viewport"
+# "2-finger-swipe" = "pan-viewport"
+# "2-finger-pinch" = "zoom"
+
+[touch.anywhere]
+# "3-finger-swipe" = "pan-viewport"           # continuous
+# "3-finger-pinch" = "zoom"                    # continuous
+# "4-finger-swipe" = "center-nearest"         # threshold (direction from drag)
+# "4-finger-pinch-in" = "zoom-to-fit"         # threshold
+# "4-finger-pinch-out" = "home-toggle"        # threshold
+# "5-finger-swipe" = "center-nearest"         # threshold (direction from drag)
+# "5-finger-pinch-in" = "zoom-to-fit"         # threshold
+# "5-finger-pinch-out" = "home-toggle"        # threshold
+# "3-finger-tap" = "center-window"
+
+[xwayland]
+# # X11 support via xwayland-satellite. driftwm spawns satellite eagerly at
+# # startup, exports DISPLAY=:N, and X11 apps connect transparently. If the
+# # binary isn't found, X11 support is disabled with a warning; everything
+# # else still runs.
+# enabled = true                  # spawn xwayland-satellite at startup
+# path    = "xwayland-satellite"  # path to xwayland-satellite binary ($PATH lookup works)
+
+[backend]
+# # Hardware stability quirks. All default to false (opt-in).
+# # Enable these if you experience flickering, crashes, or rendering issues.
+# # Particularly useful on NVIDIA GPUs with proprietary drivers.
+# # Note: These flags must be set before launching driftwm. Changing them requires a restart.
+# # For additional NVIDIA-specific settings, set these environment variables in your
+# # session wrapper script or shell profile before starting driftwm:
+# #   export SMITHAY_USE_LEGACY=1          # Use legacy DRM API instead of atomic modesetting
+# #   export __GL_GSYNC_ALLOWED=0
+# #   export __GL_VRR_ALLOWED=0
+# #   export __GL_MaxFramesAllowed=1
+# #   export NVD_BACKEND=direct
+# wait_for_frame_completion = false  # Force GPU-fence wait before every page flip
+                                     # (already done automatically when smithay reports
+                                     # needs_sync — typical case on NVIDIA. Set true
+                                     # only if you still see flicker after defaults.)
+# disable_direct_scanout = false     # Force EGL composition (disable direct scanout)
+# disable_hardware_cursor = false    # Composite the cursor into the frame instead of
+                                     # using the KMS cursor plane, while keeping direct
+                                     # scanout for fullscreen apps. Fixes a stuttering /
+                                     # tearing hardware cursor on discrete NVIDIA GPUs.
+# max_capture_fps = 0                # Cap FPS delivered to continuous screen-capture
+                                     # clients (recorders / casts). 0 = unlimited. Each
+                                     # captured frame forces a full-scene re-composite
+                                     # that competes with a fullscreen app behind it; a
+                                     # cap (e.g. 30 or 60) trims that overhead while
+                                     # gaming + streaming. One-shot screenshots (grim)
+                                     # are never throttled.
+
+[output.outline]
+# color = "#ffffff"           # outline color for other monitors' viewports
+# thickness = 1               # pixels (0 to disable)
+# opacity = 0.5               # 0.0–1.0
+
+# ## Outputs
+# # Per-output configuration — the monitor's hardware setup, plus the handful of
+# # behaviors that are worth varying between a widescreen and a portrait panel.
+# # Each [[outputs]] entry matches by connector name. Find connector names with
+# # wlr-randr or check driftwm logs at startup. Outputs without a matching entry
+# # default to scale 1.0.
+# # On the winit backend only `position` and `focus_placement` apply — mode,
+# # scale and transform belong to the host window.
+# #
+# # `name = "*"` is a wildcard entry: it applies to any connected output that
+# # has no exact-name entry (exact entries always win). A fixed `position` makes
+# # no sense on the wildcard — it's ignored (falls back to "auto").
+# #
+# # An exact-name entry replaces the wildcard entry wholesale — fields do not
+# # merge. So if `name = "*"` sets focus_placement = "right" and an exact
+# # `name = "DP-1"` entry sets only `scale`, DP-1 takes neither the wildcard's
+# # focus_placement nor its hot corners: every field it doesn't name falls back
+# # to the top-level key or the built-in default, never to the wildcard.
+# #
+# # `mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the
+# # default, and the safe choice) uses the monitor's advertised preferred mode.
+# # "max" picks the highest resolution, then highest refresh. A bare "WxH" only
+# # selects a mode the monitor already advertises — if none matches, it keeps the
+# # preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact
+# # mode, synthesizing a CVT modeline when the monitor doesn't advertise it
+# # (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
+# #
+# # Supported fields:
+# #   name            — connector name, or "*" for the fallback entry (see
+# #                     above); required.
+# #   scale           — fractional scale factor (default: 1.0).
+# #   transform       — normal, 90, 180, 270, flipped, flipped-90, flipped-180,
+# #                     or flipped-270 (default: normal).
+# #   position        — "auto" (left-to-right placement) or [x, y] in layout
+# #                     coords.
+# #   mode            — "preferred", "max", "WxH", or "WxH@Hz" (see above;
+# #                     default: preferred).
+# #   focus_placement — where a centering navigation parks the focused window
+# #                     on THIS monitor; the same nine values as the top-level
+# #                     key (see General), which it overrides.
+# #   hot_corners     — per-output screen-corner action bindings (see below).
+# #
+# # Hot-corners bind any keyboard action to a screen corner. The action fires
+# # when the cursor enters that corner of THIS output (per-monitor setting),
+# # and re-arms when the cursor leaves. The whole `[[outputs]]` block can be
+# # omitted if you don't need any hot corners on a particular monitor.
+# # A `name = "*"` entry's hot corners apply to any output without an
+# # exact-name `[[outputs]]` entry; per the wholesale-replacement rule above, an
+# # exact entry with no `hot_corners` table gets none.
+# #
+# # Corner actions: any action from the [keybindings] Actions list. Pass
+# # "none" to leave a corner unbound.
+# #
+# # Example:
+# # [[outputs]]
+# # name = "eDP-1"           # connector name, or "*" for a fallback entry (required)
+# # scale = 1.5              # fractional scale (default: 1.0)
+# # transform = "normal"     # normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
+# # position = "auto"        # "auto" (left-to-right) or [x, y] in layout coords
+# # mode = "preferred"       # "preferred", "max", "1920x1080", or "2560x1440@144"
+# #
+# # [[outputs]]
+# # name = "HDMI-A-1"
+# # scale = 1.0
+# # mode = "1920x1080@60"
+# # focus_placement = "right"   # park the active window against this ultrawide's right edge
+# #
+# # [outputs.hot_corners]
+# # threshold = 4         # corner zone size in logical px (default: 4)
+# # top_left = "zoom-to-fit"
+# # top_right = "none"
+# # bottom_left = "spawn grim - | wl-copy"
+# # bottom_right = "exec-launcher"
+# # disable_when_fullscreen = true   # suppress hot-corners while a fullscreen window is on this output (default: true)
+# # disable_while_dragging  = true   # suppress hot-corners while any mouse button is held, or a pointer grab (move/resize/pan) is active (default: true)
+
+# ## Window rules
+# # Window rules: match windows and apply per-window overrides.
+# # ALL matching rules are merged in config order (later rules override earlier
+# # ones for scalar fields; boolean flags are sticky-on). This lets you compose
+# # rules — e.g. one rule sets blur=true, a later one adds opacity=0.85.
+# #
+# # This section is the field reference. The full recipe collection, along with
+# # matching/merge semantics and pattern-syntax details, lives in
+# # docs/window-rules.md.
+# #
+# # Supported fields:
+# #   app_id     — match: Wayland app_id. X11 apps proxied via xwayland-satellite
+# #                arrive with app_id set from WM_CLASS instance (typically
+# #                lowercase). At least one of app_id/title is required; all
+# #                specified criteria must match.
+# #   title      — match: window title.
+# #   position   — [x, y] coordinates (visual-frame center, Y-up). Canvas coords,
+# #                or output-relative (origin = output center) when
+# #                pinned_to_screen.
+# #   size       — [width, height] initial dimensions of the visual frame — the
+# #                app's content plus any title bar and border driftwm draws, so
+# #                the same numbers give the same on-screen rectangle whatever
+# #                the decoration mode (one-shot; user/app can resize afterwards,
+# #                so pair with widget = true to lock it)
+# #   fullscreen — true: force this window to open in fullscreen mode
+# #   focus_on_open — false: map the window without focusing it or moving the
+# #                camera to it. Omit to keep the default focus-on-map behavior.
+# #                Pairs well with pinned_to_screen for unobtrusive overlays; the
+# #                window still takes focus later through normal interaction
+# #                (hover or click). (default: true)
+# #   widget     — true: immovable by hand (no drag, gesture or nudge) though
+# #                `driftwm msg move` still repositions it, below normal windows,
+# #                excluded from navigation and alt-tab (default: false)
+# #   pinned_to_screen — true: lock the window to the output's screen space —
+# #                ignores pan/zoom, floats above normal windows (PiP, toolbars).
+# #                `position` becomes output-relative; movable unless widget = true.
+# #                Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
+# #   suspend_on_close — override [session].suspend_on_close for matched windows
+# #                (true / false). Escape hatch for terminals and scratchpads that
+# #                should always really close (or always suspend). (default: inherit)
+# #   restore_windows — override [session].restore_windows for matched windows
+# #                (true / false). false keeps an app out of the session save, so
+# #                it doesn't come back as a suspended window on the next launch;
+# #                true restores one app while the section key stays off. Key the
+# #                rule on app_id, since a rule matching on title alone governs
+# #                saving only. Independent of suspend_on_close, which governs
+# #                closes: set both false for an app that should never leave a
+# #                stand-in behind. A window you suspended explicitly still comes
+# #                back. (default: inherit)
+# #   preserve_aspect_ratio — true: keep the window's aspect ratio during
+# #                interactive resizes; the ratio is taken at the start of each
+# #                resize. (default: false)
+# #   decoration — overrides [decorations] default_mode for matched windows.
+# #                Omit to inherit default_mode. Values:
+# #                "client":  CSD — client's own titlebar
+# #                "server":  SSD — driftwm's titlebar
+# #                "minimal": SSD — no titlebar, just shadow + corners + border
+# #                            (this is the mode for chrome-on-borderless widgets;
+# #                            border_width / corner_radius / shadow rules apply)
+# #                "none":    bare client surface — compositor adds zero chrome,
+# #                            and per-window border_width / corner_radius /
+# #                            shadow rules are ignored. Use "minimal" if you
+# #                            want chrome without a titlebar.
+# #   blur       — true: blur background behind this window (default: false). Real
+# #                GPU/VRAM cost, but it tracks the window's size on screen, so
+# #                zooming out makes a blurred window cheaper, not dearer. Once
+# #                several blurred windows cover most of the viewport between
+# #                them the compositor switches to one shared full-screen blur
+# #                they all sample, so a screenful of frost doesn't multiply the
+# #                work. Results are cached, and recomputed when the view moves
+# #                or the content behind the window changes.
+# #   opacity    — 0.0–1.0: window transparency (default: 1.0, fully opaque).
+# #                Below 1.0 a fullscreen window shows the canvas behind it
+# #                instead of black: this [background] (dot grid, shader or
+# #                image) and any canvas layers keep drawing under it, while
+# #                every layer surface stays hidden along with the other
+# #                windows. A wlr-layer wallpaper daemon (swaybg, swww) is a
+# #                layer surface, so it does not show through; set the
+# #                wallpaper in [background] if you want it visible. Costs
+# #                that output its direct scan-out for as long as the window
+# #                is fullscreen, so leave games opaque.
+# #   border_width         — per-window border width override (px). Set to 0 to
+# #                          disable border on a window even when [decorations]
+# #                          border_width > 0. Ignored for decoration = "none".
+# #   border_color         — per-window unfocused border color, "#rrggbb" or
+# #                          "#rrggbbaa" (optional alpha byte), e.g. "#5c5c5c".
+# #   border_color_focused — per-window focused border color; same "#rrggbb[aa]"
+# #                          form, with an optional alpha byte.
+# #   corner_radius        — per-window corner radius override (px). Affects
+# #                          content clip, border shape, and shadow. Ignored for
+# #                          decoration = "none".
+# #   shadow               — per-window shadow toggle. Overrides [decorations]
+# #                          shadow. Ignored for decoration = "none".
+# #   output     — output name (e.g. "DP-1") for this window's fullscreen and
+# #                initial screen-pin placement. Fullscreen: the rule wins;
+# #                otherwise the output the client requested; otherwise the
+# #                active output. pinned_to_screen: the rule; otherwise the
+# #                active output — with `position` resolved against it; dragging
+# #                or send-to-output reassigns it afterward. Find names under
+# #                `outputs.*` in `driftwm msg state`. (default: unset)
+# #   pass_keys  — controls which compositor keybindings are forwarded to the app:
+# #                  pass_keys = true — forward ALL keys (game-friendly)
+# #                  pass_keys = ["mod+q", "ctrl+q"] — forward ONLY these combos; all other compositor shortcuts stay active
+# #                  pass_keys = false / omit — compositor handles everything (default)
+# #                  VT switching (Ctrl+Alt+F1–F12) — always stays in the compositor
+# #   pass_mouse — controls which compositor mouse bindings ([mouse.*]) are forwarded to the app:
+# #                  pass_mouse = true — forward ALL mouse bindings over this window
+# #                  pass_mouse = ["alt+left", "alt+right"] — forward ONLY these combos; all other mouse bindings stay active
+# #                  pass_mouse = false / omit — compositor handles everything (default)
+# #                  SSD title bar, resize borders and close button — always stay with the compositor
+# #   layer_order — stacking among layer surfaces sharing the same wlr-layer
+# #                 (higher = on top; ties stack by map order, newest on top).
+# #                 The protocol has no z-index within a layer, so two overlay
+# #                 clients (e.g. an on-screen keyboard and a touch visualizer)
+# #                 otherwise stack by launch order. Also orders canvas-positioned
+# #                 layers among themselves. Ignored for regular windows.
+# #
+# # Pattern syntax (applies to all match fields):
+# #   Plain string `"kitty"`        — exact match
+# #   Glob `"steam_app_*"`          — `*` wildcard
+# #   Regex `"/^steam_app_\\d+$/"`  — wrap in `/…/`
+# #
+# # To find a window's identifiers, run while the window is open:
+# #   `driftwm msg state`
+# #
+# # Layer-shell surfaces (panels, notifications, bars like waybar):
+# # matched by their namespace against `app_id`. `decoration` is ignored —
+# # layers have no decoration mode. Chrome (border_width, corner_radius,
+# # shadow) is field-by-field opt-in on the rule and does NOT inherit from
+# # [decorations]. Without explicit values on the rule, a layer surface has no
+# # border, no shadow, and no corner clip.
+# #
+# # A few representative rules follow; docs/window-rules.md collects the rest.
+# #
+# # Example: Picture-in-Picture, pinned to the screen, stays put while you pan/zoom
+# # [[window_rules]]
+# # title            = "Picture-in-Picture"
+# # pinned_to_screen = true
+# # position         = [0, -300]   # output-relative: 300px below center; movable, drop to center on the output
+# #
+# # Example: Game, only let ctrl+q through, keep everything else (mod+q still closes)
+# # [[window_rules]]
+# # app_id    = "factorio"
+# # pass_keys = ["ctrl+q"]
+# #
+# # Example: Blender, let alt+drag reach the app (orbit / three-button emulation), keep all keys
+# # [[window_rules]]
+# # app_id     = "blender"
+# # pass_mouse = ["alt+left", "alt+middle", "alt+right"]
+# #
+# # Example: Compose rules, blur from first rule, opacity from second (both apply)
+# # [[window_rules]]
+# # app_id = "Alacritty"
+# # blur   = true
+# #
+# # [[window_rules]]
+# # app_id  = "Alacritty"
+# # opacity = 0.9

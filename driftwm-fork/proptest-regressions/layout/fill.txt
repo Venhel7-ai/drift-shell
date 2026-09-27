@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ae930fdf3bb92798a00dfff997229247493c87d255703fb1e8d43315757dceac # shrinks to current = SnapRect { x_low: -353.5049533833128, x_high: 180.04742708087497, y_low: 0.0, y_high: 20.0 }, obstacles = [SnapRect { x_low: -246.36573871237303, x_high: 279.0959729852267, y_low: 0.0, y_high: 591.9888807208005 }], gap = 19.404587836129505

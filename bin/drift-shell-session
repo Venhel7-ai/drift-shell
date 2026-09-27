@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${EUID} -eq 0 ]]; then echo 'Сеанс должен работать от обычного пользователя.' >&2; exit 1; fi
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/drift-shell"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/drift-shell"
+mkdir -p -- "$config_dir" "$state_dir"
+if [[ ! -e "$config_dir/driftwm.toml" ]]; then
+  install -m600 /usr/share/drift-shell/driftwm.toml "$config_dir/driftwm.toml"
+fi
+if systemctl --user is-active --quiet shell-core.service; then
+  echo 'Drift Shell уже запущена в этом пользовательском сеансе.' >&2; exit 1
+fi
+export XDG_CURRENT_DESKTOP=drift-shell
+export XDG_SESSION_DESKTOP=drift-shell
+export XDG_SESSION_TYPE=wayland
+cleanup() { systemctl --user stop shell-ui.service shell-core.service || true; }
+trap cleanup EXIT
+if [[ -n ${WAYLAND_DISPLAY:-} || -n ${DISPLAY:-} ]]; then
+  /usr/bin/driftwm-shell --backend winit --config "$config_dir/driftwm.toml" --session-file "$state_dir/compositor.json"
+else
+  /usr/bin/driftwm-shell --backend udev --config "$config_dir/driftwm.toml" --session-file "$state_dir/compositor.json"
+fi

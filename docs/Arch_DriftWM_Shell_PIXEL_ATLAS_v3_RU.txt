@@ -1,0 +1,721 @@
+﻿PIXEL REFERENCE ATLAS V3
+Эталонные изображения + разделение WORK / REFERENCE
+
+======================================================================
+V3 PROFILE MAPPING ДЛЯ РЕФЕРЕНСОВ
+======================================================================
+
+Все старые изображения остаются эталонами профиля REFERENCE, а не default WORK.
+
+REFERENCE:
+- wide search;
+- pinned right panel;
+- visible dock;
+- all 1..9;
+- stronger glass;
+- graphs always visible;
+- cosmic Zen new-tab;
+- optional decorative quote.
+
+WORK:
+на базе тех же geometry/material language, но:
+- right hidden;
+- dock auto-hide overlay;
+- compact search 248 px;
+- smart workspace max 5;
+- no quote;
+- graphs expanded-only;
+- app windows nearly opaque;
+- weaker borders;
+- compact 29 px titlebar;
+- fewer stars;
+- faster motion;
+- lock no quote;
+- login no big card.
+
+Новые обязательные WORK goldens:
+
+W01_work_desktop_clean
+- TopBar compact.
+- Right hidden.
+- Dock hidden.
+- 2–3 tiled windows.
+- stars visible only in gaps/background.
+
+W02_work_right_peek
+- RightPanel overlay.
+- main windows unchanged.
+- no reflow.
+
+W03_work_right_pinned
+- RightPanel reserves.
+- windows reflow.
+
+W04_work_dock_reveal
+- Dock overlay visible.
+- windows unchanged.
+
+W05_work_search
+- compact search expanded to palette.
+
+W06_work_focus
+- no right;
+- no dock;
+- notifications DND;
+- maximum code space.
+
+W07_work_lock
+- no quote;
+- no hint;
+- no input until typing.
+
+W08_work_login
+- no large card;
+- password focused;
+- session selector hidden for single session.
+
+W09_work_settings_basic
+- only Basic categories/controls.
+
+W10_work_settings_expert
+- Expert properties visible deliberately.
+
+Старые G01..G18 остаются reference/legacy baselines, если их визуальные параметры соответствуют исходным концептам.
+
+======================================================================
+PIXEL ATLAS V2 — ИСХОДНАЯ ГЕОМЕТРИЯ REFERENCE PROFILE
+======================================================================
+
+PIXEL REFERENCE ATLAS V2
+Arch Linux + driftwm + Quickshell
+Эталонный viewport: 1672×941 px
+Назначение: связать каждый референсный PNG с конкретным состоянием системы и устранить неоднозначность при реализации.
+
+ВАЖНО
+Все 10 присланных PNG имеют размер 1672×941 px. Это сгенерированные визуальные концепты, поэтому отдельные надписи и декоративные детали могут противоречить финальному ТЗ. Геометрия и композиция используются как визуальный ориентир; язык, semantic colors, безопасность, интеракции и state machines определяются MASTER SPEC V2.
+
+======================================================================
+1. ГЛОБАЛЬНАЯ СИСТЕМА КООРДИНАТ
+======================================================================
+
+Viewport:
+left=0
+top=0
+right=1672
+bottom=941
+
+Основные линии:
+Top modules: y≈5..45.
+Main application content: y≈69..845.
+Dock glass body: y≈853..914.
+Left outer margin: ≈15 px.
+Right outer margin: ≈12 px.
+Main inter-window gap: 14 px.
+Right-panel gap to center: ≈13 px.
+
+Канонические значения из основной спецификации имеют приоритет над приблизительными значениями, визуально снятыми с референса.
+
+======================================================================
+2. ОБЩИЕ PIXEL TOKENS
+======================================================================
+
+Background: #000000.
+Primary text: rgba(255,255,255,0.92).
+Secondary text: rgba(255,255,255,0.66).
+Tertiary text: rgba(255,255,255,0.46).
+Disabled: rgba(255,255,255,0.28).
+Idle border: rgba(255,255,255,0.13).
+Hover border: rgba(255,255,255,0.22).
+Active border: rgba(255,255,255,0.42).
+Glass: rgba(8,10,11,0.74).
+Strong glass: rgba(8,10,11,0.84).
+Success: #5CFF8B.
+Error: #FF5C64.
+Window/card radius: 12 px.
+Modal/login radius: 18 px.
+Blur visual equivalent: 22 px.
+Standard border: 1 px.
+Standard desktop gap: 14 px.
+
+======================================================================
+3. TOP BAR — ОБЩИЙ ЭТАЛОН
+======================================================================
+
+ArchIdentity:
+x=17 y=7 w≈138 h≈38.
+Arch logo visual≈25×25.
+Label starts x≈59.
+
+WorkspaceSwitcher:
+x=176 y=5 w=329 h=39.
+9 slots.
+Active slot≈30×30.
+
+GlobalSearch:
+x=651 y=6 w=474 h=39.
+
+SystemTray:
+x=1220 y=6 w=300 h=39.
+
+Optional quote:
+примерно x=1536..1654.
+В Work profile выключена.
+
+TopBar — набор независимых floating modules, не одна сплошная полоска.
+
+======================================================================
+4. BASE DESKTOP GRID
+======================================================================
+
+Left work area:
+x=15
+y=69
+w=730
+h=776
+right=745
+bottom=845
+
+Center top:
+x=759
+y=69
+w=598
+h=414
+right=1357
+bottom=483
+
+Center bottom:
+x=759
+y=497
+w=598
+h=348
+right=1357
+bottom=845
+
+Right panel:
+x=1370
+y=69
+w=290
+right=1660
+
+Dock body:
+x=543
+y=853
+w=579
+h=61
+
+Использовать именно эту сетку как G01 desktop_base golden state.
+
+======================================================================
+5. REFERENCE 01 — TELEGRAM + GRAFANA В ZEN
+Файл: 25fefbc3-55cc-4611-88f4-dfb22cb6537b(5).png
+======================================================================
+
+Сценарий:
+- shell desktop;
+- Zen Browser основное окно;
+- RightPanel visible;
+- Dock visible;
+- Telegram Web и Grafana внутри browser split view.
+
+Browser outer:
+x≈15
+y≈69
+right≈1357
+bottom≈802..845 в зависимости от фактической outer shadow.
+radius=12.
+
+Browser internal left sidebar:
+примерно 175–190 px от внутреннего левого края.
+
+Telegram section:
+левая часть content.
+Визуально состоит из conversation list и message pane.
+
+Grafana:
+правая половина content.
+
+Split divider:
+1 px visible line;
+6 px invisible hit-zone.
+
+Right panel:
+System, Servers, Tasks, Quote.
+
+Нормативные исправления:
+- shell Russian;
+- сайт может оставаться English;
+- цветные Grafana series — content, не shell accent;
+- браузерное split ratio сохраняется отдельно от desktop tiling.
+
+======================================================================
+6. REFERENCE 02 — ARCHWIKI + GITHUB SPLIT
+Файл: 291c9a66-69db-476e-9c86-5d83d8a1fa1f(5).png
+======================================================================
+
+Сценарий:
+Zen Browser focused.
+Vertical sidebar слева.
+ArchWiki широкий pane слева.
+GitHub issues pane справа.
+RightPanel shell и Dock shell остаются видимыми.
+
+Browser outer:
+x≈15
+y≈69
+right≈1357
+bottom≈858.
+
+Browser sidebar:
+≈200 px.
+
+Toolbar:
+≈47 px high.
+
+Content split после sidebar:
+left pane≈63%.
+right pane≈37%.
+
+Inner pane corners:
+8–10 px.
+
+Разделитель между panes:
+visible 1 px, pointer hit-zone 6 px.
+
+Этот reference показывает плотный «docs/code review» layout, но не задаёт жёсткую системную раскладку для всех browser windows.
+
+======================================================================
+7. REFERENCE 03 — ZEN NEW TAB В SHELL
+Файл: 729ed1a3-391d-4ee4-b18e-ed1dc2a1393e(5).png
+======================================================================
+
+Сценарий:
+Zen Browser открывает custom new-tab page.
+RightPanel visible.
+Dock visible.
+
+Browser outer:
+x≈15 y≈69 right≈1357 bottom≈845.
+
+Sidebar:
+≈220 px.
+
+Main new-tab composition:
+- Zen logo по центру верхней половины;
+- search field≈530–650 px width;
+- ряд quick tiles;
+- нижние cards Recent / Quick Commands / Quote.
+
+Cosmic landscape на этом reference НЕ является системным wallpaper.
+Он допускается только как optional browser new-tab preset «Космос».
+Default production new-tab рекомендуется black+stars, чтобы не нарушать общий минимализм.
+
+======================================================================
+8. REFERENCE 04 — SYSTEM SETTINGS
+Файл: 4376d3b1-0243-4a2d-851c-2ec5f513df42(5).png
+======================================================================
+
+Outer Settings window:
+x≈46
+y≈62
+right≈1606
+bottom≈894
+w≈1560
+h≈832
+radius≈13.
+
+Header:
+h≈70.
+
+Left navigation:
+relative x≈15..220.
+width≈205.
+row height≈36.
+row radius≈7.
+
+Main content:
+relative x≈235..1090.
+
+Right column:
+relative x≈1100..1540.
+Live Preview сверху.
+Panel & Dock controls ниже.
+
+Settings cards:
+radius≈10–12.
+padding≈14–16.
+gap≈10–12.
+
+Slider track≈4 px.
+Slider thumb≈12 px.
+Switch≈34×18.
+Checkbox≈15×15.
+Dropdown height≈32.
+
+Production correction:
+все shell-owned strings русские.
+Каждый visible control обязан быть связан с реальным schema property.
+Нельзя рисовать декоративную настройку, которая ничего не меняет.
+
+======================================================================
+9. REFERENCE 05 — SINGLE TOAST С QUICK REPLY
+Файл: bc5ad764-7f4f-40e5-bd0c-5b3fa7210f15(5).png
+======================================================================
+
+Base desktop как reference 07.
+Toast находится в верхней правой части поверх/рядом с RightPanel.
+
+Standard toast:
+w≈350–380.
+min h≈104.
+для expanded quick reply≈190–220.
+radius=12.
+padding≈14.
+
+Структура сверху вниз:
+1 source row;
+2 avatar/sender/title;
+3 message body;
+4 action buttons;
+5 reply field;
+6 send button.
+
+Reply field height≈38.
+Send≈38×38 либо compact text button.
+
+Animation:
+show X +40 -> 0, opacity 0->1, scale .985->1, 200 ms.
+hide X 0 -> +48, opacity 1->0, 150 ms.
+
+Reply существует только при backend capability.reply=true.
+
+======================================================================
+10. REFERENCE 06 — NOTIFICATION CENTER
+Файл: e1eb3fa3-eb3f-4a6d-905d-cbf3cd07ad71(5).png
+======================================================================
+
+Notification center:
+right-side large glass panel.
+Приблизительно x≈1275..1640.
+y≈69..904.
+w≈360–380.
+radius≈14.
+
+Header≈48 high.
+Title «Уведомления».
+Button «Очистить всё»≈80×30.
+
+Filter chips:
+h≈32.
+gap≈6.
+
+Expanded group содержит inline conversation/reply.
+Collapsed groups compact.
+
+Scroll:
+vertical.
+Scrollbar hidden idle; появляется при interaction.
+
+При reserve-mode desktop reflow обязателен.
+При overlay-mode panel может накладываться; profile выбирает policy.
+
+======================================================================
+11. REFERENCE 07 — ОСНОВНОЙ DESKTOP
+Файл: 05a0f6cc-6e97-4db9-af69-66b7f6f2cda6(6).png
+======================================================================
+
+Это главный desktop golden reference.
+
+TopBar — канонические координаты раздела 3.
+Left editor — каноническая область раздела 4.
+Center top terminal — раздел 4.
+Center bottom monitor — раздел 4.
+RightPanel — раздел 4.
+Dock — раздел 4.
+
+Right cards примерная вертикальная раскладка:
+System y≈69 h≈233.
+Servers y≈313 h≈198.
+Tasks y≈522 h≈247.
+Quote y≈782 h≈106.
+
+В Work profile Quote card может быть выключена; тогда Tasks/другие cards используют освободившуюся область по configured layout.
+
+======================================================================
+12. REFERENCE 08 — LOCK SCREEN
+Файл: e9d3c55c-846b-486d-a95d-fa24068c8f11(2).png
+======================================================================
+
+Background:
+black + deterministic sparse stars.
+No landscape.
+
+Arch identity:
+left≈30 top≈20–25.
+logo≈22–24.
+
+System pill:
+right≈30 top≈18.
+h≈40.
+
+Clock:
+centerX=836.
+Inter Light≈88 px.
+visual center≈y320.
+
+Date:
+ниже часов≈16 px gap.
+
+На PNG присутствует цитата.
+Production default: OFF.
+Если пользователь включил — optional module под датой.
+
+Avatar:
+≈78–82 circle.
+Username под ним.
+
+Idle:
+никаких password field, instruction text или buttons.
+
+Typing/password state:
+clock translateY≈-24 и scale≈0.92 за≈180 ms.
+Password field появляется под username:
+w≈330 h≈42 radius≈10.
+
+Wrong password:
+ERROR border ~400 ms.
+shake total≈260 ms: 0,-4,+4,-3,+3,0.
+
+======================================================================
+13. REFERENCE 09 — LOGIN/GREETER
+Файл: 0e3ceb66-7bc4-467e-8f51-964136ca3921(2).png
+======================================================================
+
+Background:
+black+stars.
+
+Arch identity top-left.
+System pill top-right.
+Power controls bottom-left.
+
+Login card:
+centerX=836.
+visual top≈247.
+w≈478.
+radius≈18.
+
+Content:
+avatar≈84.
+username≈24 px.
+session selector≈46 high.
+password≈46 high.
+login button≈48 high.
+
+Single-session production:
+session selector hidden.
+Password receives focus immediately.
+Enter authenticates.
+
+No onboarding/help text.
+
+======================================================================
+14. REFERENCE 10 — STANDALONE ZEN BROWSER
+Файл: 0a0d4680-7a6e-4191-b180-ee80c40259c4(5).png
+======================================================================
+
+Этот reference предназначен для browser chrome, а не shell layout.
+
+Browser fills viewport.
+Top tab strip.
+Left sidebar with Spaces + bookmarks.
+Main custom new-tab.
+
+Использовать для настройки:
+- sidebar density;
+- top tab row spacing;
+- URL bar radius;
+- left navigation visual hierarchy;
+- new-tab typography;
+- tile sizes;
+- media card.
+
+Не считать background этого reference системным wallpaper.
+
+======================================================================
+15. WINDOW MATERIAL
+======================================================================
+
+Outer radius=12.
+Border=1.
+Active border rgba white .42.
+Inactive .13.
+Background rgba(8,10,11,.78).
+Shadow y=8 blur=28 alpha≈.42.
+
+Titlebar h=34.
+Header base white alpha≈.025.
+Bottom divider white alpha≈.08.
+
+Window control hit-area≈28×28.
+Visual icon≈13–14.
+
+Close hover:
+ERROR icon + ERROR_SOFT background, без ярко-красной полной кнопки.
+
+======================================================================
+16. RIGHT PANEL MATERIAL
+======================================================================
+
+Width=290.
+Each card radius=12.
+Border=1 idle.
+Strong glass .84.
+Padding≈14.
+Shadow blur≈20 alpha≈.32.
+
+Metric progress h≈6 radius=3.
+Status dot≈10.
+Task checkbox≈16.
+
+Hidden translation must exceed panel width + outer margin:
+recommended +320 px in reference coordinates.
+
+======================================================================
+17. DOCK MATERIAL
+======================================================================
+
+x=543 y=853 w=579 h=61.
+radius=12.
+padding x≈18 y≈8.
+item hit-area=44×44.
+icon=24×24.
+gap≈10–14.
+divider≈1×30.
+
+Hover:
+icon scale 1.07, background white alpha .06, 130 ms.
+Press:
+scale≈.94, 65 ms down, 100 ms return.
+
+Hidden:
+translateY≈+82, opacity 0, scale≈.975, 230 ms.
+
+======================================================================
+18. STAR FIELD
+======================================================================
+
+System background only:
+75% radius≈0.55;
+18%≈0.90;
+6%≈1.25;
+1%≈1.8 + soft halo.
+
+Small opacity≈.22–.52.
+Medium≈.50–.76.
+Large≈.75–.95.
+Halo blur≈4–7, alpha≈.10–.24.
+
+Seed default fixed: 0xD17F7.
+Golden tests freeze seed.
+
+Anchored: visually static.
+FreeCanvas: stars tied to canvas coordinates enough to give camera motion reference.
+
+======================================================================
+19. TYPOGRAPHY
+======================================================================
+
+Inter Variable:
+Lock clock 88 Light.
+Browser clock 58 Light.
+Title L 24/30 Medium.
+Title M 18/24 Medium.
+Title S 15/20 Medium.
+Body M 14/20 Regular.
+Body S 12/17 Regular.
+Caption 10/14.
+Micro 9/12.
+System indicator 12 Medium.
+
+JetBrains Mono:
+code/status/technical labels as defined.
+
+Не использовать массово 700/800.
+
+======================================================================
+20. MOTION GOLDEN VALUES
+======================================================================
+
+Press 70 ms.
+Release 100 ms.
+Hover in 120 ms.
+Hover out 100 ms.
+Focus 120 ms.
+Window open 200 ms.
+Window close 150 ms.
+Layout 210 ms.
+Workspace marker 190 ms.
+Camera 280 ms.
+Dock show 250 ms.
+Dock hide 230 ms.
+Right show 260 ms.
+Right hide 220 ms.
+Toast show 200 ms.
+Toast hide 150 ms.
+Search 180 ms.
+
+Default easing:
+cubic-bezier(.20,.80,.20,1.00)
+Soft:
+cubic-bezier(.16,1.00,.30,1.00)
+InOut:
+cubic-bezier(.65,0,.35,1)
+
+======================================================================
+21. PIXEL QA PROCEDURE
+======================================================================
+
+1. Run Preview 1672×941 exactly.
+2. Scale 100%.
+3. Same pinned Inter/JetBrains Mono versions.
+4. Deterministic stars.
+5. Frozen time/date/mock data.
+6. Freeze animation at required state.
+7. Render PNG.
+8. Produce pixel-diff and perceptual-diff.
+9. Geometry-critical difference >2 px = fail.
+10. Radius difference >1 px = fail.
+11. Border visually >1 logical px = fail.
+12. Wrong semantic green/red = fail.
+13. Blue/yellow/purple shell accent = fail.
+14. English shell-owned production string = fail.
+15. Lock/login instructional hint = fail.
+16. System landscape wallpaper = fail.
+17. RightPanel visible pixels after hidden state = fail.
+18. Dock visible pixels after hidden state = fail.
+
+Blur/font antialiasing compare perceptually, not byte-for-byte.
+
+======================================================================
+22. GOLDEN STATE NAMES
+======================================================================
+
+G01 desktop_base
+G02 desktop_right_hidden
+G03 desktop_dock_hidden
+G04 desktop_focus
+G05 browser_telegram_grafana
+G06 browser_archwiki_github
+G07 browser_newtab
+G08 settings_main
+G09 notification_toast_reply
+G10 notification_center
+G11 lock_idle
+G12 lock_password
+G13 login_single_session
+G14 login_multi_session
+G15 login_error
+G16 search_open
+G17 free_canvas
+G18 design_mode
+
+Каждый golden сопровождается geometry.json, theme version, font version и mask для blur/text dynamic areas.

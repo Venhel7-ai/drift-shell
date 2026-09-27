@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/quickshell -p /usr/share/drift-shell/shell-lock/shell.qml

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP
+if [[ -n ${DISPLAY:-} ]]; then systemctl --user import-environment DISPLAY; fi
+if [[ -n ${DRIFTWM_SOCKET:-} ]]; then systemctl --user import-environment DRIFTWM_SOCKET; fi
+if command -v dbus-update-activation-environment >/dev/null; then
+  dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+fi
+systemctl --user start shell-core.service shell-ui.service

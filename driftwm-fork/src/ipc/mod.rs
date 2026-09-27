@@ -1,0 +1,1395 @@
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
+use smithay::reexports::wayland_server::Resource;
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
+use smithay::wayland::seat::WaylandFocus;
+
+use crate::decorations::DecorationKey;
+use crate::state::{DriftWm, NavZoom, StageWindow, SuspendedId};
+use driftwm::window_ext::WindowExt;
+
+pub mod client;
+pub mod protocol;
+
+use self::protocol::{
+    Event, OutputInfo, Reply, Request, Response, ScreenshotTarget, StateInfo, WindowSelector,
+    socket_path,
+};
+
+/// Reject a command line longer than this (without a newline) — bounds the
+/// per-connection buffer against a client that never terminates a command.
+const MAX_COMMAND_SIZE: usize = 262144;
+
+/// Cap how long a reply write may block, so a stuck reader can't hang the loop.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub struct IpcServer {
+    socket_path: PathBuf,
+}
+
+impl IpcServer {
+    pub fn new(
+        event_loop: &LoopHandle<'static, DriftWm>,
+        wayland_display: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_at(event_loop, socket_path(wayland_display))
+    }
+
+    /// Bind the IPC listener at an explicit path instead of the
+    /// `WAYLAND_DISPLAY`-derived one. Tests point this at a private temp dir so
+    /// they never touch the live session's socket directory.
+    pub fn new_at(
+        event_loop: &LoopHandle<'static, DriftWm>,
+        socket_path: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        std::fs::remove_file(&socket_path).ok();
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let listener = UnixListener::bind(&socket_path)?;
+        listener.set_nonblocking(true)?;
+        std::fs::set_permissions(&socket_path, PermissionsExt::from_mode(0o600))?;
+
+        tracing::info!("IPC socket started at {}", socket_path.display());
+
+        let source = Generic::new(listener, Interest::READ, Mode::Level);
+        event_loop.insert_source(source, |_, listener, state| {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => accept_client(state, stream),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    // A transient accept error (e.g. fd exhaustion) must never
+                    // tear down the compositor — log and keep serving.
+                    Err(e) => {
+                        tracing::warn!("IPC accept error: {e}");
+                        break;
+                    }
+                }
+            }
+            Ok(PostAction::Continue)
+        })?;
+
+        Ok(Self { socket_path })
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.socket_path).ok();
+        tracing::debug!("IPC socket cleaned up");
+    }
+}
+
+/// Register an accepted connection as its own calloop source. The closure owns a
+/// per-connection read buffer so partial commands survive across event-loop ticks.
+fn accept_client(state: &mut DriftWm, stream: UnixStream) {
+    if let Err(e) = stream.set_nonblocking(true) {
+        tracing::warn!("IPC: failed to set client nonblocking: {e}");
+        return;
+    }
+    let mut buffer: Vec<u8> = Vec::with_capacity(256);
+    let source = Generic::new(stream, Interest::READ, Mode::Level);
+    // The callback hands a `&mut NoIoDrop<UnixStream>` which derefs to
+    // `&UnixStream`; its Read/Write impls take `&self`, so a shared ref suffices.
+    let registered = state
+        .loop_handle
+        .insert_source(source, move |_, stream, state| {
+            Ok(serve_connection(stream, &mut buffer, state))
+        });
+    if let Err(e) = registered {
+        tracing::warn!("IPC: failed to register client connection: {e}");
+    }
+}
+
+/// Drain everything readable, answering each complete `\n`-terminated command.
+fn serve_connection(
+    mut stream: &UnixStream,
+    buffer: &mut Vec<u8>,
+    state: &mut DriftWm,
+) -> PostAction {
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return disconnect(stream, state), // EOF
+            Ok(n) => {
+                buffer.extend_from_slice(&chunk[..n]);
+                if buffer.len() > MAX_COMMAND_SIZE {
+                    tracing::warn!("IPC command too large, disconnecting");
+                    return disconnect(stream, state);
+                }
+                while let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=nl).collect();
+                    // A half-written pushed event must be flushed before any
+                    // reply, or the reply lands mid-line and corrupts framing.
+                    if flush_pending_events(stream, state).is_err() {
+                        return disconnect(stream, state);
+                    }
+                    let written = match serde_json::from_slice::<Request>(&line[..nl]) {
+                        // Needs the raw stream to register a push channel, so it's
+                        // handled here rather than through the stream-less dispatch.
+                        Ok(Request::Subscribe) => subscribe(stream, state),
+                        Ok(request) => write_reply(stream, &dispatch(request, state)),
+                        Err(e) => write_reply(stream, &Err(format!("invalid request: {e}"))),
+                    };
+                    if written.is_err() {
+                        return disconnect(stream, state);
+                    }
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return PostAction::Continue,
+            Err(e) => {
+                tracing::warn!("IPC read error: {e}");
+                return disconnect(stream, state);
+            }
+        }
+    }
+}
+
+/// Tear down a connection, forgetting its subscription. Must run while the
+/// serving fd is still open: once calloop closes it, the fd number can be
+/// reused by a new connection, and a stale registry entry keyed on it would
+/// swallow that connection's own `Subscribe`.
+fn disconnect(stream: &UnixStream, state: &mut DriftWm) -> PostAction {
+    let fd = stream.as_raw_fd();
+    state.ipc_subscribers.retain(|s| s.fd != fd);
+    PostAction::Remove
+}
+
+/// Blocking-flush any pushed-event bytes still pending on this connection's
+/// subscription (the client is mid-request, so it's reading).
+fn flush_pending_events(stream: &UnixStream, state: &mut DriftWm) -> std::io::Result<()> {
+    let fd = stream.as_raw_fd();
+    let Some(sub) = state.ipc_subscribers.iter_mut().find(|s| s.fd == fd) else {
+        return Ok(());
+    };
+    let partial = std::mem::take(&mut sub.partial);
+    let queued = sub.queued.take();
+    if !partial.is_empty() {
+        write_line(stream, &partial)?;
+    }
+    if let Some(event) = queued {
+        write_line(stream, &event)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
+    // The animated setters (Camera/Zoom) only stash a target — they don't
+    // self-schedule a frame — so every state-changing command needs the kick.
+    // Pure queries don't, and shouldn't force a redraw.
+    if is_mutating(&request) {
+        state.mark_all_dirty();
+    }
+
+    match request {
+        Request::ShellCamera {
+            output,
+            center,
+            zoom,
+            anchored,
+        } => shell_camera(&output, center, zoom, anchored, state),
+        Request::ShellLayout { revision, targets } => shell_layout(revision, targets, state),
+        Request::Camera(arg) => cmd_camera(arg, state),
+        Request::Zoom(arg) => cmd_zoom(arg, state),
+        Request::Layout { short } => cmd_layout(short, state),
+        Request::State => Ok(cmd_state(state)),
+        Request::DebugCounters => Ok(Response::DebugCounters(state.debug_counters())),
+        // Handled in serve_connection, which has the raw stream Subscribe needs.
+        Request::Subscribe => unreachable!("Subscribe is handled before dispatch"),
+        Request::Focus(arg) => cmd_focus(arg, state),
+        Request::Move { window, to } => cmd_move(window, to, state),
+        Request::Resize { window, to } => cmd_resize(window, to, state),
+        Request::Opacity { window, value } => cmd_opacity(window, value, state),
+        Request::Pin { window, value } => cmd_pin(window, value, state),
+        Request::Close(sel) => cmd_close(sel, state),
+        Request::Suspend(sel) => cmd_suspend(sel, state),
+        Request::Relaunch(sel) => cmd_relaunch(sel, state),
+        Request::Action(spec) => cmd_action(&spec, state),
+        Request::Bookmark { name, to, delete } => cmd_bookmark(name, to, delete, state),
+        Request::Screenshot {
+            target,
+            scale,
+            path,
+        } => cmd_screenshot(&target, scale, &path, state),
+    }
+}
+
+fn is_mutating(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::ShellCamera { .. }
+            | Request::ShellLayout { .. }
+            | Request::Camera(Some(_))
+            | Request::Zoom(Some(_))
+            | Request::Focus(Some(_))
+            | Request::Move { to: Some(_), .. }
+            | Request::Resize { to: Some(_), .. }
+            | Request::Opacity { value: Some(_), .. }
+            | Request::Pin { value: Some(_), .. }
+            | Request::Close(_)
+            | Request::Suspend(_)
+            | Request::Relaunch(_)
+            | Request::Action(_)
+            // Setting or deleting a bookmark can flip an active-bookmark incumbent
+            // without moving the camera; the per-frame refresh needs a render to
+            // pick it up. Bare get/list (no `to`, no `delete`) stays a pure query.
+            | Request::Bookmark { to: Some(_), .. }
+            | Request::Bookmark { delete: true, .. }
+    )
+}
+
+fn cmd_camera(arg: Option<(f64, f64)>, state: &mut DriftWm) -> Reply {
+    match arg {
+        None => {
+            let (x, y) = camera_center(state);
+            Ok(Response::Camera { x, y })
+        }
+        Some((x, y)) => {
+            // Before the exit, so a malformed request can't tear down fullscreen
+            // on its way to being rejected. serde_json parses `1e999` as `inf`
+            // without error, and an infinite target never satisfies the camera
+            // animation's arrival test — the viewport would never settle again.
+            if !x.is_finite() || !y.is_finite() {
+                return Err("camera coordinates must be finite numbers".to_string());
+            }
+            // Exit before deriving the target below: a fullscreen output
+            // refuses camera moves, and the target is derived from `state.zoom()`,
+            // which the park pins at 1.0 until the exit restores it.
+            if state.is_fullscreen() {
+                state.exit_fullscreen();
+            }
+            // (x, y) is the viewport center, Y-up; map it to the internal camera
+            // target so the viewport ends up centered there.
+            let target =
+                driftwm::canvas::camera_for_center(x, y, state.zoom(), state.get_viewport_size());
+            state.set_camera_target(Some(target));
+            Ok(Response::Camera { x, y })
+        }
+    }
+}
+
+fn cmd_zoom(arg: Option<f64>, state: &mut DriftWm) -> Reply {
+    match arg {
+        None => Ok(Response::Zoom(state.zoom())),
+        Some(zoom) => {
+            if !zoom.is_finite() || zoom <= 0.0 {
+                return Err("zoom must be a positive number".to_string());
+            }
+            // As in `cmd_camera`: exit first, since `zoom_to_anchored` below
+            // anchors on the current camera and zoom, which the exit restores.
+            if state.is_fullscreen() {
+                state.exit_fullscreen();
+            }
+            // Same bounds as keyboard/gesture zoom; reply reports what was applied.
+            let clamped = zoom.clamp(state.min_zoom(), driftwm::canvas::MAX_ZOOM);
+            // Anchor on the viewport center (like keyboard zoom) so the center
+            // stays put — otherwise zoom drifts the camera off the `camera` point.
+            state.zoom_to_anchored(clamped);
+            Ok(Response::Zoom(clamped))
+        }
+    }
+}
+
+fn cmd_layout(short: bool, state: &mut DriftWm) -> Reply {
+    if !short {
+        return Ok(Response::Layout(state.active_layout.clone()));
+    }
+    Ok(Response::Layout(active_layout_short(state)))
+}
+
+/// The `input.keyboard.layout` token at the active XKB group index (e.g. `ru`),
+/// for status bars that want the code rather than the full display name.
+///
+/// The stored config always matches the loaded keymap (init pins it on the
+/// invalid-config fallback, reload swaps both together), so the index resolves;
+/// the display-name fallback only guards a malformed token (e.g. a trailing comma).
+pub(crate) fn active_layout_short(state: &mut DriftWm) -> String {
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return state.active_layout.clone();
+    };
+    let index =
+        keyboard.with_xkb_state(state, |ctx| ctx.xkb().lock().unwrap().active_layout().0) as usize;
+    layout_code(&state.config.keyboard_layout.layout, index)
+        .unwrap_or_else(|| state.active_layout.clone())
+}
+
+/// The `index`-th code in a comma-separated layout list, trimmed; `None` if the
+/// index is out of range or the token is empty (e.g. a trailing comma).
+fn layout_code(layout_list: &str, index: usize) -> Option<String> {
+    layout_list
+        .split(',')
+        .nth(index)
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .map(str::to_owned)
+}
+
+fn cmd_state(state: &mut DriftWm) -> Response {
+    Response::State(Box::new(state_info(state)))
+}
+
+/// Build the full state snapshot shared by the `state` reply and subscription
+/// events, so the two representations can't drift.
+pub(crate) fn state_info(state: &mut DriftWm) -> StateInfo {
+    let windows = state.window_inventory();
+    let (fullscreen, pinned) = state.screen_space_inventory();
+    let (layers, canvas_layers) = state.layer_inventory();
+    let layout = state.active_layout.clone();
+    let layout_short = active_layout_short(state);
+    let camera = camera_center(state);
+    let zoom = state.zoom();
+
+    let active = state.active_output();
+    let outputs = state
+        .space
+        .outputs()
+        .map(|output| {
+            let (cam, z, active_bookmark) = {
+                let os = crate::state::output_state(output);
+                (os.camera, os.zoom, os.active_bookmark.clone())
+            };
+            let logical = crate::state::output_logical_size(output);
+            OutputInfo {
+                name: output.name(),
+                camera: driftwm::canvas::viewport_center(cam, z, logical),
+                zoom: z,
+                size: [logical.w, logical.h],
+                active: active.as_ref() == Some(output),
+                active_bookmark,
+            }
+        })
+        .collect();
+
+    // The focused output's incumbent — the value ext-workspace advertises.
+    let active_bookmark =
+        active.and_then(|o| crate::state::output_state(&o).active_bookmark.clone());
+
+    StateInfo {
+        camera,
+        zoom,
+        layout,
+        layout_short,
+        windows,
+        fullscreen,
+        pinned,
+        layers,
+        canvas_layers,
+        outputs,
+        active_bookmark,
+    }
+}
+
+/// Resolve a selector to a live window. `None` = the focused window. AppId
+/// matching is a case-insensitive substring search that skips widgets; id
+/// lookup is exact and reaches widgets too.
+fn window_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Result<smithay::desktop::Window, String> {
+    match selector {
+        None => state
+            .focused_window()
+            .ok_or_else(|| "no focused window".to_string()),
+        Some(WindowSelector::Id(n)) => state
+            .stage
+            .window_by_id(driftwm::stage::ElementId(*n))
+            .and_then(|w| w.client())
+            .cloned()
+            .ok_or_else(|| format!("no window with id {n}")),
+        Some(WindowSelector::AppId(s)) => {
+            let needle = s.to_lowercase();
+            state
+                .stage
+                .windows()
+                .filter_map(|w| w.client())
+                .find(|w| {
+                    !w.is_widget()
+                        && w.app_id_or_class()
+                            .is_some_and(|a| a.to_lowercase().contains(&needle))
+                })
+                .cloned()
+                .ok_or_else(|| format!("no window matching '{needle}'"))
+        }
+    }
+}
+
+/// Resolve a selector to a suspended window's [`SuspendedId`], if it names one.
+/// `None` selector resolves to the gated-focused suspended window. Id matches
+/// the stage `ElementId` (the IPC handle, stable across suspend/relaunch);
+/// AppId is a case-insensitive substring match on the original app_id.
+fn suspended_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Option<SuspendedId> {
+    match selector {
+        None => state.gated_suspended_focus(),
+        Some(WindowSelector::Id(n)) => state
+            .stage
+            .window_by_id(driftwm::stage::ElementId(*n))
+            .and_then(|w| w.suspended())
+            .map(|s| s.id),
+        Some(WindowSelector::AppId(s)) => {
+            let needle = s.to_lowercase();
+            state
+                .stage
+                .windows()
+                .filter_map(|w| w.suspended())
+                .find(|s| s.identity.app_id.to_lowercase().contains(&needle))
+                .map(|s| s.id)
+        }
+    }
+}
+
+/// IPC handle + app_id for a suspended window (its stage `ElementId`), for the
+/// `Focused` reply.
+fn suspended_focused_info(state: &DriftWm, id: SuspendedId) -> Option<protocol::FocusedWindow> {
+    let element = state
+        .stage
+        .windows()
+        .find(|w| w.suspended().is_some_and(|s| s.id == id))?;
+    Some(protocol::FocusedWindow {
+        id: state.stage.id_of(element)?.0,
+        app_id: element.app_id_or_class(),
+    })
+}
+
+fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let Some(selector) = arg else {
+        // Report the focused window, preferring a live client and falling back
+        // to a focused suspended stand-in.
+        if let Some(w) = state.focused_window() {
+            return Ok(Response::Focused(Some(focused_window_info(state, &w))));
+        }
+        let info = state
+            .gated_suspended_focus()
+            .and_then(|id| suspended_focused_info(state, id));
+        return Ok(Response::Focused(info));
+    };
+    // A live client wins over a same-named suspended stand-in; a selector that
+    // resolves only to a stand-in navigates to it (focus + raise + pan).
+    let window = match window_by_selector(state, Some(&selector)) {
+        Ok(window) => window,
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, Some(&selector)) else {
+                return Err(e);
+            };
+            let info = suspended_focused_info(state, id);
+            state.reveal_suspended(id);
+            return Ok(Response::Focused(info));
+        }
+    };
+    // Widgets are only reachable by id (the app_id search skips them) and can't
+    // take focus.
+    if window.is_widget() {
+        let id = focused_window_info(state, &window).id;
+        return Err(format!("window #{id} is a widget and cannot be focused"));
+    }
+    // A window still held back for a deferred adopt is drawn nowhere: focusing
+    // it would put the keyboard somewhere the user cannot see, and it arrives on
+    // its own once the grab holding the adopt lets go.
+    if state.hidden_by_deferred_adopt(&window) {
+        let id = focused_window_info(state, &window).id;
+        return Err(format!(
+            "window #{id} is mid-relaunch and cannot be focused yet"
+        ));
+    }
+    let info = focused_window_info(state, &window);
+    // Already on screen: just raise + focus, don't move the camera. Pinned
+    // windows are always on screen and have no canvas position to navigate to.
+    if state.is_pinned(&window) || state.window_fully_in_viewport(&window) {
+        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
+    } else {
+        state.navigate_to_window(
+            &window,
+            NavZoom::from_reset(state.config.zoom_reset_on_activation),
+        );
+    }
+    Ok(Response::Focused(Some(info)))
+}
+
+fn focused_window_info(
+    state: &DriftWm,
+    window: &smithay::desktop::Window,
+) -> protocol::FocusedWindow {
+    protocol::FocusedWindow {
+        id: state
+            .stage
+            .id_of(window)
+            .expect("window from the stage has an id")
+            .0,
+        app_id: window.app_id_or_class(),
+    }
+}
+
+/// Reuses the config-file parser so the IPC `action` command stays in lockstep
+/// with keybindable actions.
+fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
+    let action = driftwm::config::parse_action(spec)?;
+    state.execute_action(&action);
+    Ok(Response::Ok)
+}
+
+/// List / get / set / delete bookmarks. The registry is a flat name → [x, y]
+/// (Y-up) map that the config seeds and set-bookmark/reload also mutate; every
+/// change here marks the durable session dirty. Never touches zoom.
+fn cmd_bookmark(
+    name: Option<String>,
+    to: Option<(f64, f64)>,
+    delete: bool,
+    state: &mut DriftWm,
+) -> Reply {
+    if delete {
+        let name = name.ok_or_else(|| "bookmark delete requires a name".to_string())?;
+        if to.is_some() {
+            return Err("bookmark delete does not take coordinates".to_string());
+        }
+        if state.bookmarks.remove(&name).is_none() {
+            return Err(format!("no bookmark named '{name}'"));
+        }
+        state.session_store_mark_dirty();
+        return Ok(Response::Ok);
+    }
+    match (name, to) {
+        // No name and no coordinates → list everything (BTreeMap sorts by name).
+        (None, None) => Ok(Response::Bookmarks(state.bookmarks.clone())),
+        // Coordinates without a name can't identify a bookmark to set.
+        (None, Some(_)) => Err("bookmark coordinates require a name".to_string()),
+        (Some(name), None) => {
+            let &[x, y] = state
+                .bookmarks
+                .get(&name)
+                .ok_or_else(|| format!("no bookmark named '{name}'"))?;
+            Ok(Response::Bookmark { x, y })
+        }
+        (Some(name), Some((x, y))) => {
+            if !x.is_finite() || !y.is_finite() {
+                return Err("bookmark coordinates must be finite".to_string());
+            }
+            state.bookmarks.insert(name, [x, y]);
+            state.session_store_mark_dirty();
+            Ok(Response::Bookmark { x, y })
+        }
+    }
+}
+
+/// Resolve a selector to a stage element, **live client first**: a selector
+/// naming both a client and a stand-in must reach the client, and only one
+/// matching nothing live falls back to a stand-in. The order decides which
+/// target an ambiguous `AppId` hits, so every window verb shares this.
+fn element_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Result<StageWindow, String> {
+    match window_by_selector(state, selector) {
+        Ok(window) => Ok(StageWindow::Client(window)),
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, selector) else {
+                return Err(e);
+            };
+            state
+                .find_suspended(id)
+                .map(StageWindow::Suspended)
+                .ok_or_else(|| "suspended window is gone".to_string())
+        }
+    }
+}
+
+fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
+    let window = match element_by_selector(state, window.as_ref())? {
+        StageWindow::Client(window) => window,
+        // No client to reconfigure: read or set the stand-in's canvas position
+        // in place, without the re-raise `map_window` would carry.
+        element @ StageWindow::Suspended(_) => {
+            let size = driftwm::stage::StageElement::size(&element);
+            let chrome = state.element_chrome(&element);
+            return match to {
+                None => {
+                    let loc = state.stage.position_of(&element).unwrap_or_default();
+                    let (x, y) = driftwm::canvas::content_to_rule(loc, size, chrome);
+                    Ok(Response::Position { x, y })
+                }
+                Some((x, y)) => {
+                    let loc = driftwm::canvas::rule_to_content(x, y, size, chrome);
+                    state.stage.set_position(&element, loc);
+                    // A stand-in's canvas position is durable — coalesce the
+                    // write like a pointer/touch drag does.
+                    state.session_store_mark_dirty();
+                    Ok(Response::Position { x, y })
+                }
+            };
+        }
+    };
+    match to {
+        None => {
+            // Committed geometry, matching what `msg state` and the state file
+            // derive a position from, so the two can't disagree mid-settle.
+            let size = window.geometry().size;
+            let loc = state.stage.position_of(&window).unwrap_or_default();
+            // The read arm answers before the canvas guard below, so it is the one
+            // `move` path a fullscreen window — which wears no chrome — reaches.
+            let chrome = state.reported_chrome(&window);
+            let (x, y) = driftwm::canvas::content_to_rule(loc, size, chrome);
+            Ok(Response::Position { x, y })
+        }
+        Some((x, y)) => {
+            // A pinned window renders at its pin, a fullscreen one at its
+            // camera park, and one held back for a deferred adopt is about to be
+            // teleported into a slot — writing the canvas position would
+            // silently do nothing, displace the park, or be overwritten.
+            if state.is_pinned(&window)
+                || state.is_window_fullscreen(&window)
+                || state.hidden_by_deferred_adopt(&window)
+            {
+                return Err(
+                    "this window has no canvas position to move: it is pinned, fullscreen, or \
+                     not on screen yet"
+                        .into(),
+                );
+            }
+            // Activating is only consistent when the target already holds
+            // focus; a selector can reach any window. Widgets never activate.
+            let activate = state.focused_window().as_ref() == Some(&window) && !window.is_widget();
+            state.map_window_to_rule_point(&window, x, y, activate);
+            // `stage.map` always raises and nothing re-asserts stacking until
+            // the next raise. The render buckets keep a widget painted below
+            // windows either way, but the input hit-tests walk raw stage order.
+            if window.is_widget() {
+                state.enforce_below_windows();
+            }
+            // Persist on the session-store debounce, matching the stand-in arm
+            // above. Widgets are excluded from the store, so their move lasts
+            // only this session.
+            state.session_store_mark_dirty();
+            Ok(Response::Position { x, y })
+        }
+    }
+}
+
+fn cmd_resize(
+    window: Option<WindowSelector>,
+    to: Option<(i32, i32)>,
+    state: &mut DriftWm,
+) -> Reply {
+    let element = element_by_selector(state, window.as_ref())?;
+
+    // Fullscreen-aware because the read arm below answers before the canvas
+    // guard; on the set path the guard rejects a fullscreen window anyway.
+    let chrome = state.reported_chrome(&element);
+
+    let Some((width, height)) = to else {
+        // Committed size, matching what `msg state` and the state file report,
+        // so the two can't disagree mid-settle.
+        let size = chrome.frame_size(driftwm::stage::StageElement::size(&element));
+        return Ok(Response::Size {
+            width: size.w,
+            height: size.h,
+        });
+    };
+
+    if width <= 0 || height <= 0 {
+        return Err("size must be positive".to_string());
+    }
+    // A pinned window renders at its pin, a fullscreen one fills its output, and
+    // one held back for a deferred adopt is about to be replaced — none of them
+    // hold a canvas rect a resize could write.
+    if !state.is_canvas_window(&element) {
+        return Err(
+            "this window has no canvas size to set: it is pinned, fullscreen, a widget, or not \
+             on screen yet"
+                .into(),
+        );
+    }
+    // A live grab recomputes the rect absolutely from its own start anchors on
+    // every motion tick, so anything written mid-drag is erased by the next one.
+    // The settling tail counts too: `handle_resize_commit` still owes a
+    // top/left edge compensation, and this call clears every witness
+    // `placement_owns_size` would have used to skip it.
+    //
+    // Only the window being dragged carries the state this reads, not the
+    // snapped neighbours a cluster drag carries along — a resize aimed at one of
+    // those is accepted and then overwritten by the drag's next tick.
+    if state.element_under_interactive_grab(&element) {
+        return Err(
+            "this window is under an interactive move or resize, or still settling one".to_string(),
+        );
+    }
+
+    // The request names a visual frame; the client's own min/max hints, and
+    // everything downstream of here, are content-space. Deflate, clamp there, and
+    // re-inflate for the echo.
+    let requested = chrome.content_size(Size::from((width, height)));
+    let (width, height) =
+        crate::state::resize_constraints(&element, chrome).clamp(requested.w, requested.h);
+    let current = state.requested_element_size(&element);
+    let loc = state.stage.position_of(&element).unwrap_or_default();
+    // Center-preserving: half the size delta off each axis. Chrome is a constant
+    // offset across the resize, so holding the frame's center is the same
+    // arithmetic as holding the content's and needs no term of its own.
+    let loc = Point::from((
+        loc.x + (current.w - width) / 2,
+        loc.y + (current.h - height) / 2,
+    ));
+    // Raise a client, as `move` does; leave a stand-in's z-order alone, as
+    // `move` also does.
+    let raise = matches!(element, StageWindow::Client(_));
+    // Absolute: this rect is the whole answer, so there is no promise for a later
+    // call to reconcile against.
+    state.resize_element_to(&element, Size::from((width, height)), loc, raise, None);
+    let echo = chrome.frame_size(Size::from((width, height)));
+    Ok(Response::Size {
+        width: echo.w,
+        height: echo.h,
+    })
+}
+
+/// Runtime per-window opacity. A set writes a pin into the stored
+/// `AppliedWindowRule`, and applies to anything the compositor renders, so no
+/// widget/pinned/fullscreen guard.
+fn cmd_opacity(window: Option<WindowSelector>, value: Option<f64>, state: &mut DriftWm) -> Reply {
+    let window = window_by_selector(state, window.as_ref())?;
+    let surface = window
+        .wl_surface()
+        .ok_or_else(|| "window has no surface".to_string())?;
+    match value {
+        None => {
+            let focused = state.focus_root_window();
+            Ok(Response::Opacity(
+                state.effective_opacity_of(&window, focused.as_ref()),
+            ))
+        }
+        Some(v) => {
+            // Reject rather than clamp: the docs promise commands fail on bad values.
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err("opacity must be between 0.0 and 1.0".to_string());
+            }
+            smithay::wayland::compositor::with_states(&surface, |states| {
+                states.data_map.insert_if_missing_threadsafe(|| {
+                    std::sync::Mutex::new(driftwm::config::AppliedWindowRule::default())
+                });
+                states
+                    .data_map
+                    .get::<std::sync::Mutex<driftwm::config::AppliedWindowRule>>()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .opacity = Some(v);
+            });
+            Ok(Response::Opacity(v))
+        }
+    }
+}
+
+/// Screen-pinning as a bool: the scriptable form of `toggle-pin-to-screen`.
+fn cmd_pin(window: Option<WindowSelector>, value: Option<bool>, state: &mut DriftWm) -> Reply {
+    let window = match element_by_selector(state, window.as_ref())? {
+        StageWindow::Client(window) => window,
+        StageWindow::Suspended(_) => return Err("stand-ins can't be pinned".to_string()),
+    };
+    let pinned = state.is_pinned(&window);
+    let Some(value) = value else {
+        return Ok(Response::Pin(pinned));
+    };
+    // Fullscreen holds the pin for its duration — entry stashes it, exit
+    // restores it — so neither direction is settable until the window leaves.
+    if state.is_window_fullscreen(&window) {
+        return Err("fullscreen windows can't be pinned".to_string());
+    }
+    if value == pinned {
+        return Ok(Response::Pin(value));
+    }
+    if value {
+        // Drawn nowhere until its adopt lands, and the reveal then maps it into
+        // a slot a pin would make visually inert.
+        if state.hidden_by_deferred_adopt(&window) {
+            return Err("this window is not on screen yet".to_string());
+        }
+        state.pin_window(&window)?;
+    } else {
+        // Activating is only consistent when the target already holds focus; a
+        // selector can reach any window. Widgets never activate.
+        let activate = state.focused_window().as_ref() == Some(&window) && !window.is_widget();
+        state.unpin_window(&window, activate);
+        // `stage.map` always raises; the render buckets keep a widget painted
+        // below windows either way, but the input hit-tests walk raw stage order.
+        if window.is_widget() {
+            state.enforce_below_windows();
+        }
+    }
+    Ok(Response::Pin(value))
+}
+
+fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => {
+            // An explicit `msg close` is a real close — it must not convert
+            // under `suspend_on_close`.
+            state.mark_real_close(&window);
+            window.send_close();
+            Ok(Response::Ok)
+        }
+        // No live client — a suspended stand-in has none to close, so `msg
+        // close` dismisses it.
+        Err(e) => match suspended_by_selector(state, sel.as_ref()) {
+            Some(id) => {
+                state.dismiss_suspended(id);
+                Ok(Response::Ok)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Suspend a window by selector: focus it (without moving the camera) if it
+/// isn't already focused, then run it through the `suspend-window` action
+/// path — the same one a keybinding hits, so fullscreen/pin handling and mark
+/// bookkeeping stay in one place.
+fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let window = match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => window,
+        Err(e) => {
+            return match suspended_by_selector(state, sel.as_ref()) {
+                Some(_) => Err("window is already suspended".to_string()),
+                None => Err(e),
+            };
+        }
+    };
+    if window.is_widget() {
+        return Err("widgets cannot be suspended".to_string());
+    }
+    // The window itself must not be a dialog/modal (same restriction as the
+    // `suspend-window` action).
+    if window.parent_surface().is_some() || window.is_modal() {
+        return Err("cannot suspend a dialog".to_string());
+    }
+    // A window with an open modal child is ineligible too — raise_and_focus
+    // would silently redirect to the child instead.
+    if state.topmost_modal_child(&window).is_some() {
+        return Err("window has an open modal dialog".to_string());
+    }
+    // A window still held back for a deferred adopt cannot take the keyboard, so
+    // the action's focus-resolved target would be somebody else's window. It is
+    // never fullscreen or pinned while hidden (both are withheld for the
+    // duration), so the plain suspend is the whole of what the action would do.
+    if state.hidden_by_deferred_adopt(&window) {
+        state.suspend_window(&window, None);
+        return Ok(Response::Ok);
+    }
+    if state.focused_window().as_ref() != Some(&window) {
+        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
+    }
+    cmd_action("suspend-window", state)
+}
+
+/// Relaunch a suspended window by selector (the focused stand-in when `None`).
+fn cmd_relaunch(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let id = suspended_by_selector(state, sel.as_ref())
+        .ok_or_else(|| "no suspended window matching selector".to_string())?;
+    // Captured before the call, so a failed relaunch can name the app in the error.
+    let name = state
+        .find_suspended(id)
+        .map(|s| s.identity.display_name.clone());
+    if state.relaunch_suspended(id) {
+        Ok(Response::Ok)
+    } else {
+        let name = name.unwrap_or_else(|| "the app".to_string());
+        Err(format!("{name} is no longer installed"))
+    }
+}
+
+/// Capture a screenshot synchronously to `path`.
+///
+/// The renderer lives on the backend, so we take it out of `state` to split the
+/// borrow (as the render loop does) and put it back on every path.
+fn cmd_screenshot(target: &ScreenshotTarget, scale: f64, path: &str, state: &mut DriftWm) -> Reply {
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("screenshot path must be absolute".to_string());
+    }
+    let (region, isolate) = resolve_screenshot_region(target, state)?;
+    // `window` captures isolate the window on transparency; every other target is
+    // a scene capture with the background.
+    let include_background = !matches!(target, ScreenshotTarget::Window { .. });
+
+    let mut backend = state
+        .backend
+        .take()
+        .ok_or("no renderer available for capture")?;
+    let result = {
+        let renderer = backend.renderer();
+        crate::render::capture_region_to_png(
+            state,
+            renderer,
+            region,
+            scale,
+            include_background,
+            isolate.as_ref(),
+            std::path::Path::new(path),
+        )
+    };
+    state.backend = Some(backend);
+
+    let cap = result?;
+    Ok(Response::Screenshot {
+        path: path.to_string(),
+        width: cap.width,
+        height: cap.height,
+    })
+}
+
+/// Resolve a screenshot target to an internal canvas rect (top-left, Y-down)
+/// and, for a `window` target, the element to compose in isolation (`None` for
+/// scene targets, which render every window).
+pub(crate) fn resolve_screenshot_region(
+    target: &ScreenshotTarget,
+    state: &DriftWm,
+) -> Result<(Rectangle<i32, Logical>, Option<crate::state::StageWindow>), String> {
+    use crate::state::StageWindow;
+    match target {
+        ScreenshotTarget::Viewport => {
+            let output = state.active_output().ok_or("no active output to capture")?;
+            Ok((crate::state::output_viewport_rect(&output), None))
+        }
+        ScreenshotTarget::Window { window } => {
+            // A selector resolving only to a stand-in captures its chrome in
+            // isolation (docs promise suspended ids screenshot). Pinned and
+            // fullscreen clients capture fine too — `window_visual_rect` returns
+            // the right rect for both.
+            let element = element_by_selector(state, window.as_ref())?;
+            let rect = match &element {
+                StageWindow::Client(w) => window_visual_rect(state, w)
+                    .ok_or_else(|| "window has no capturable area".to_string())?,
+                StageWindow::Suspended(_) => state
+                    .visual_frame_rect(&element)
+                    .map(snap_rect_to_rect)
+                    .ok_or_else(|| "suspended window has no capturable area".to_string())?,
+            };
+            Ok((rect, Some(element)))
+        }
+        ScreenshotTarget::All => {
+            // Union over every canvas element, stand-ins included — the capture
+            // renders their chrome, so an all-suspended canvas must frame them,
+            // not error "no windows to capture".
+            let mut acc: Option<Rectangle<i32, Logical>> = None;
+            for element in state.stage.windows() {
+                let r = match element {
+                    StageWindow::Client(w) if state.is_canvas_window(w) => {
+                        window_visual_rect(state, w)
+                    }
+                    StageWindow::Suspended(_) => {
+                        state.visual_frame_rect(element).map(snap_rect_to_rect)
+                    }
+                    _ => None,
+                };
+                let Some(r) = r else {
+                    continue;
+                };
+                acc = Some(match acc {
+                    Some(a) => union_rect(a, r),
+                    None => r,
+                });
+            }
+            let rect = acc.ok_or_else(|| "no windows to capture".to_string())?;
+            // Frame the windows with `fit_padding` canvas units of margin.
+            // `fit_padding` is defined as screen px at the fit zoom; applied in
+            // canvas units it equals that px count only at `--scale 1`.
+            let pad = state.config.zoom_fit_padding.max(0.0).round() as i32;
+            Ok((
+                Rectangle::new(
+                    Point::<i32, Logical>::from((rect.loc.x - pad, rect.loc.y - pad)),
+                    Size::<i32, Logical>::from((rect.size.w + 2 * pad, rect.size.h + 2 * pad)),
+                ),
+                None,
+            ))
+        }
+        ScreenshotTarget::Region {
+            x,
+            y,
+            w,
+            h,
+            from_screen,
+        } => {
+            let (x, y, w, h, from_screen) = (*x, *y, *w, *h, *from_screen);
+            if w <= 0 || h <= 0 {
+                return Err("region width and height must be positive".to_string());
+            }
+            if from_screen {
+                // slurp coords live in the output *layout* space (`current_location()`,
+                // what wl_output/xdg-output advertise), NOT the output's position in the
+                // canvas Space (which tracks the camera). Map through the output hit.
+                let point = Point::<i32, Logical>::from((x, y));
+                let output = state
+                    .space
+                    .outputs()
+                    .find(|o| {
+                        Rectangle::new(o.current_location(), crate::state::output_logical_size(o))
+                            .contains(point)
+                    })
+                    .cloned()
+                    .or_else(|| state.active_output())
+                    .ok_or("no output for the screen region")?;
+                let layout_pos = output.current_location();
+                let (camera, zoom) = {
+                    let os = crate::state::output_state(&output);
+                    (os.camera, os.zoom)
+                };
+                let loc = Point::<i32, Logical>::from((
+                    (camera.x + (x - layout_pos.x) as f64 / zoom).round() as i32,
+                    (camera.y + (y - layout_pos.y) as f64 / zoom).round() as i32,
+                ));
+                let size = Size::<i32, Logical>::from((
+                    (w as f64 / zoom).round() as i32,
+                    (h as f64 / zoom).round() as i32,
+                ));
+                Ok((Rectangle::new(loc, size), None))
+            } else {
+                let size = Size::<i32, Logical>::from((w, h));
+                let loc = driftwm::canvas::rule_to_internal(x, y, size);
+                Ok((Rectangle::new(loc, size), None))
+            }
+        }
+    }
+}
+
+/// A window's full visual extent on the canvas: content padded by the title bar
+/// (above), border, and shadow radius — must match what `compose_capture_elements`
+/// draws. `None` if the window has no location or zero size.
+fn window_visual_rect(
+    state: &DriftWm,
+    window: &smithay::desktop::Window,
+) -> Option<Rectangle<i32, Logical>> {
+    let loc = state.stage.position_of(window)?;
+    let size = window.geometry().size;
+    if size.w <= 0 || size.h <= 0 {
+        return None;
+    }
+    let wl_surface = window.wl_surface()?;
+
+    let is_fullscreen = state.stage.is_fullscreen(window);
+    let has_ssd = !is_fullscreen
+        && state
+            .decorations
+            .contains_key(&DecorationKey::Surface(wl_surface.id()));
+    let applied = driftwm::config::applied_rule(&wl_surface);
+    let mode = driftwm::config::effective_decoration_mode(
+        applied.as_ref().and_then(|r| r.decoration.as_ref()),
+        &state.config.decorations.default_mode,
+    );
+    let bw = if is_fullscreen {
+        0
+    } else {
+        driftwm::config::effective_border_width(applied.as_ref(), mode, &state.config.decorations)
+    };
+    let shadow = !is_fullscreen
+        && driftwm::config::effective_shadow_enabled(
+            applied.as_ref(),
+            mode,
+            &state.config.decorations,
+        );
+    let bar = if has_ssd {
+        state.config.decorations.title_bar_height
+    } else {
+        0
+    };
+    let pad = if shadow {
+        driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32
+    } else {
+        0
+    };
+    let edge = bw + pad;
+    Some(Rectangle::new(
+        Point::<i32, Logical>::from((loc.x - edge, loc.y - bar - edge)),
+        Size::<i32, Logical>::from((size.w + 2 * edge, size.h + bar + 2 * edge)),
+    ))
+}
+
+/// A `SnapRect` (f64 canvas bounds) as an integer `Rectangle`, for framing a
+/// suspended stand-in in a screenshot region.
+fn snap_rect_to_rect(r: driftwm::layout::snap::SnapRect) -> Rectangle<i32, Logical> {
+    let x = r.x_low.floor() as i32;
+    let y = r.y_low.floor() as i32;
+    // Anchor and extent round outward independently so fractional bounds stay
+    // covered (ceil of the difference can end short of x_high).
+    let w = (r.x_high.ceil() as i32 - x).max(1);
+    let h = (r.y_high.ceil() as i32 - y).max(1);
+    Rectangle::new((x, y).into(), (w, h).into())
+}
+
+fn union_rect(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let x0 = a.loc.x.min(b.loc.x);
+    let y0 = a.loc.y.min(b.loc.y);
+    let x1 = (a.loc.x + a.size.w).max(b.loc.x + b.size.w);
+    let y1 = (a.loc.y + a.size.h).max(b.loc.y + b.size.h);
+    Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
+}
+
+/// Serialize and send a reply over `stream`.
+fn write_reply(stream: &UnixStream, reply: &Reply) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(reply)?;
+    bytes.push(b'\n');
+    write_line(stream, &bytes)
+}
+
+/// Send a pre-serialized line on the request/reply path. Switches to a bounded
+/// blocking write so a large payload isn't truncated on `WouldBlock` and a stuck
+/// reader can't hang the loop, then restores nonblocking.
+fn write_line(mut stream: &UnixStream, bytes: &[u8]) -> std::io::Result<()> {
+    stream.set_nonblocking(false).ok();
+    stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
+    let res = stream.write_all(bytes);
+    stream.set_nonblocking(true).ok();
+    res
+}
+
+/// A subscribed IPC connection: the serving stream's fd (for dedup and
+/// disconnect cleanup), a cloned write handle, and at most two buffered
+/// events — the unwritten tail of the one in flight, plus the newest queued
+/// one (older queued events are superseded, since each is a full snapshot).
+/// Writes never block, so a subscriber that stops reading just accumulates a
+/// queued event and converges once its socket drains.
+pub struct Subscriber {
+    fd: std::os::fd::RawFd,
+    stream: UnixStream,
+    partial: Vec<u8>,
+    queued: Option<Vec<u8>>,
+}
+
+/// Ack a `Subscribe`, push the current snapshot, and register the connection for
+/// future pushes. A repeat on an already-subscribed connection just re-sends the
+/// snapshot (deduped by the serving stream's fd). A failed `try_clone` replies
+/// `Err` and registers nothing.
+fn subscribe(stream: &UnixStream, state: &mut DriftWm) -> std::io::Result<()> {
+    // Clone the write half before acking, so a clone failure surfaces as an
+    // error reply rather than a silently half-registered subscriber.
+    let clone = match stream.try_clone() {
+        Ok(c) => c,
+        Err(e) => return write_reply(stream, &Err(format!("cannot subscribe: {e}"))),
+    };
+    write_reply(stream, &Ok(Response::Ok))?;
+    // The initial snapshot may block (bounded): the client just asked for it,
+    // so it's reading — same guarantee a `state` reply gets.
+    let mut bytes = serde_json::to_vec(&Event::State(state_info(state)))?;
+    bytes.push(b'\n');
+    write_line(stream, &bytes)?;
+    let fd = stream.as_raw_fd();
+    if !state.ipc_subscribers.iter().any(|s| s.fd == fd) {
+        state.ipc_subscribers.push(Subscriber {
+            fd,
+            stream: clone,
+            partial: Vec::new(),
+            queued: None,
+        });
+    }
+    Ok(())
+}
+
+/// Push the current state to every subscriber, dropping the ones whose
+/// connection is gone. Writes never block: a subscriber still draining a
+/// previous event gets this one queued (superseding any older queued event)
+/// and converges once its socket drains.
+pub(crate) fn broadcast_state_event(state: &mut DriftWm) {
+    if state.ipc_subscribers.is_empty() {
+        return;
+    }
+    let Ok(mut bytes) = serde_json::to_vec(&Event::State(state_info(state))) else {
+        return;
+    };
+    bytes.push(b'\n');
+    // A dirty tick that serializes to the same snapshot (e.g. the state-file
+    // write failing persistently and retrying) carries no information — don't
+    // re-send it. New subscribers got the snapshot at subscribe time.
+    let digest = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    if state.ipc_last_event_hash == Some(digest) {
+        return;
+    }
+    state.ipc_last_event_hash = Some(digest);
+
+    let mut subs = std::mem::take(&mut state.ipc_subscribers);
+    subs.retain_mut(|sub| {
+        if sub.partial.is_empty() {
+            sub.partial = bytes.clone();
+        } else {
+            sub.queued = Some(bytes.clone());
+        }
+        drain_subscriber(sub)
+    });
+    state.ipc_subscribers = subs;
+}
+
+/// Retry buffered event writes for subscribers whose socket was full, so a
+/// stalled-then-recovered subscriber converges even when no new change fires a
+/// broadcast. Called per rendered frame while any subscriber exists.
+pub(crate) fn flush_subscriber_outboxes(state: &mut DriftWm) {
+    if state
+        .ipc_subscribers
+        .iter()
+        .all(|s| s.partial.is_empty() && s.queued.is_none())
+    {
+        return;
+    }
+    state.ipc_subscribers.retain_mut(drain_subscriber);
+}
+
+/// Write as much buffered event data as the socket accepts without blocking.
+/// `false` means the connection is gone.
+fn drain_subscriber(sub: &mut Subscriber) -> bool {
+    loop {
+        if sub.partial.is_empty() {
+            match sub.queued.take() {
+                Some(next) => sub.partial = next,
+                None => return true,
+            }
+        }
+        if !try_drain(&sub.stream, &mut sub.partial) {
+            return false;
+        }
+        if !sub.partial.is_empty() {
+            // Socket full — keep the tail for the next attempt.
+            return true;
+        }
+    }
+}
+
+/// Write as much of `pending` as the socket accepts without blocking, keeping
+/// the rest. `false` means the connection is gone.
+fn try_drain(mut stream: &UnixStream, pending: &mut Vec<u8>) -> bool {
+    while !pending.is_empty() {
+        match stream.write(pending) {
+            Ok(0) => return false,
+            Ok(n) => {
+                pending.drain(..n);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// The viewport center, Y-up — same representation as the state file, so `camera`,
+/// `state`, and the state file all agree.
+fn camera_center(state: &DriftWm) -> (f64, f64) {
+    driftwm::canvas::viewport_center(state.camera(), state.zoom(), state.get_viewport_size())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::layout_code;
+
+    #[test]
+    fn layout_code_indexes_the_list() {
+        assert_eq!(layout_code("us,ru", 0).as_deref(), Some("us"));
+        assert_eq!(layout_code("us,ru", 1).as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn layout_code_trims_whitespace() {
+        assert_eq!(layout_code("us, ru", 1).as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn layout_code_rejects_out_of_range_and_empty() {
+        assert_eq!(layout_code("us,ru", 2), None);
+        assert_eq!(layout_code("us,", 1), None);
+    }
+}
+
+fn shell_camera(
+    name: &str,
+    center: (f64, f64),
+    zoom: f64,
+    anchored: bool,
+    state: &mut DriftWm,
+) -> Reply {
+    if !center.0.is_finite()
+        || !center.1.is_finite()
+        || center.0.abs() > 1e8
+        || center.1.abs() > 1e8
+        || !zoom.is_finite()
+        || !(0.01..=1.0).contains(&zoom)
+    {
+        return Err("invalid shell camera".into());
+    }
+    let output = state
+        .space
+        .outputs()
+        .find(|o| o.name() == name)
+        .cloned()
+        .ok_or("unknown output")?;
+    if state.is_output_fullscreen(&output) {
+        return Err("output is fullscreen".into());
+    }
+    let camera = driftwm::canvas::camera_for_center(
+        center.0,
+        center.1,
+        zoom,
+        crate::state::output_logical_size(&output),
+    );
+    {
+        let mut os = crate::state::output_state(&output);
+        os.camera = camera;
+        os.zoom = zoom;
+        os.shell_anchored = anchored;
+        os.camera_target = None;
+        os.zoom_target = None;
+        os.zoom_animation_anchor = None;
+        os.momentum.stop();
+        os.edge_pan_velocity = None;
+        os.panning = false;
+    }
+    state.mark_all_dirty();
+    Ok(Response::Ok)
+}
+
+fn shell_layout(_revision: u64, targets: Vec<protocol::ShellTarget>, state: &mut DriftWm) -> Reply {
+    if targets.len() > 512 {
+        return Err("too many targets".into());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut prepared = Vec::with_capacity(targets.len());
+    // Validate the complete batch before any client receives a configure.
+    // calloop cannot interleave client events between validation and commit.
+    for t in targets {
+        if !ids.insert(t.id)
+            || t.w <= 0
+            || t.h <= 0
+            || t.w > 32768
+            || t.h > 32768
+            || t.x.unsigned_abs() > 100_000_000
+            || t.y.unsigned_abs() > 100_000_000
+        {
+            return Err("invalid layout target".into());
+        }
+        let element = element_by_selector(state, Some(&WindowSelector::Id(t.id)))?;
+        if !state.is_canvas_window(&element) || state.element_under_interactive_grab(&element) {
+            return Err("window is not available for layout".into());
+        }
+        let chrome = state.reported_chrome(&element);
+        let requested = chrome.content_size(Size::from((t.w, t.h)));
+        let (w, h) =
+            crate::state::resize_constraints(&element, chrome).clamp(requested.w, requested.h);
+        if (w, h) != (requested.w, requested.h) {
+            return Err("LAYOUT_MIN_SIZE_CONFLICT".into());
+        }
+        let size = Size::from((w, h));
+        let loc = driftwm::canvas::rule_to_content(t.x, t.y, size, chrome);
+        prepared.push((element, size, loc));
+    }
+    for (element, size, loc) in prepared {
+        state.resize_element_to(&element, size, loc, false, None);
+    }
+    state.session_store_mark_dirty();
+    Ok(Response::Ok)
+}

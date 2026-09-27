@@ -1,0 +1,651 @@
+﻿IMPLEMENTATION CONTRACTS V3 — FINAL
+Основа: V2 contracts + V3 ergonomic corrections.
+Если V2 и V3 расходятся, V3 amendments имеют приоритет.
+
+======================================================================
+V3 IMPLEMENTATION AMENDMENTS
+======================================================================
+
+1. PROFILE SYSTEM
+
+Profile object:
+id
+name
+inherits
+visualOverrides
+behaviorOverrides
+
+Built-in:
+work
+reference
+focus-presentation
+minimal
+showcase
+
+Profile switching must be transactional and must not rewrite user's per-zone layout tree.
+
+2. RIGHT PANEL STATE MACHINE
+
+States:
+Hidden
+ShowingPeek
+Peek
+HidingPeek
+PreparingPin
+Pinned
+Unpinning
+
+Peek->Pinned:
+reserve target first;
+layout begins shrink;
+panel remains visible;
+when layout reaches safe progress, state Pinned.
+
+Pinned->Peek:
+release reserve;
+layout expands;
+panel remains overlay.
+
+Any transition is reversible.
+
+3. DOCK STATE MACHINE
+
+Hidden
+Revealing
+VisibleOverlay
+VisiblePinned
+Hiding
+
+WORK startup = Hidden.
+Pointer edge optional.
+Bind always works.
+
+4. MATERIAL TOKENS
+
+Every Surface component has:
+materialRole = App | Shell | Overlay
+
+It may not set arbitrary blur directly unless expert override enabled.
+Default values come from Theme.
+
+5. GRAPH RENDER POLICY
+
+metricsGraphPolicy:
+Off
+OnHover
+ExpandedOnly
+Always
+
+Sampling continues at backend cadence independent of rendering.
+Hidden graphs do not request repaint.
+
+6. SETTINGS LEVEL
+
+Property metadata contains:
+uiLevel = Basic | Advanced | Expert
+
+Search ignores uiLevel filter when exact result is found.
+
+7. DESIGN CONTAINERS
+
+Every movable UI component has:
+containerId
+order
+alignment
+stretch
+min/max
+visibility
+
+absoluteX/Y only valid if layoutMode=Absolute and expertMode=true.
+
+8. LOCK/GREETER THEMING
+
+Lock and Greeter import same generated token snapshot but do not import arbitrary third-party QML widgets.
+
+9. QUICK WORKSPACE SWITCHER
+
+VisibleSlots algorithm:
+include active
+include nearest previous/next
+include occupied quickSlots until maxVisible=5
+if more -> overflow.
+
+Keyboard slots 1..9 remain independent from visible slots.
+
+10. TITLEBAR POLICY
+
+Tiled:
+compact 29 px.
+Floating:
+29–34 px configurable.
+Reference:
+legacy 34 px.
+
+11. WORK SAFE AREA
+
+Default:
+TopBar reserves top.
+RightPanel Hidden/Peek does not reserve.
+Dock overlay does not reserve.
+Pinned Right/Dock reserve only when explicitly configured.
+
+12. SEMANTIC COLOR TEST
+
+Automated UI linter should detect use of SUCCESS/ERROR tokens.
+Allowed semantic roles must be declared in component metadata.
+A CPU graph declaring genericMetric cannot bind SUCCESS color.
+
+13. ANIMATION PRESETS
+
+work-fast
+reference-smooth
+reduced-motion
+
+No component hard-codes duration if matching preset token exists.
+
+14. STARFIELD PERFORMANCE
+
+Stars rendered as one batched node/shader where possible.
+No one-QML-object-per-star design at production scale.
+Static Anchored scene should not continuously repaint.
+
+15. WINDOW MATERIAL
+
+Compositor must not force blur behind every application unless profile enables it.
+Opaque-ish application surfaces are preferred.
+
+16. REFERENCE GOLDENS
+
+All existing historic reference screenshots are tested under profile=reference.
+New ergonomic golden screenshots are tested under profile=work.
+These are separate baselines and must not be mixed.
+
+======================================================================
+V2 CONTRACTS — СОХРАНЕНЫ КАК БАЗОВЫЕ ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ
+======================================================================
+
+IMPLEMENTATION CONTRACTS + ACCEPTANCE PLAN V2
+Arch Linux / driftwm fork / Quickshell-QML / Rust
+Назначение: технические контракты, без которых красивое ТЗ нельзя надёжно реализовать.
+
+======================================================================
+1. ПРОЦЕССЫ
+======================================================================
+
+driftwm-fork — compositor authority.
+shell-core — state/config/layout/integration authority.
+shell-ui — presentation only.
+shell-lock — secure session lock.
+auth-helper — PAM only.
+shell-greeter — pre-session login UI.
+zen-native-host — browser bridge.
+windows-preview — cross-platform UI preview with mocks.
+
+Критическое правило: UI не является источником истины для layout или authentication.
+
+======================================================================
+2. IPC ОБЩИЙ ФОРМАТ
+======================================================================
+
+Сообщения versioned.
+Command:
+requestId
+schemaVersion
+action
+payload
+
+Response:
+requestId
+ok
+errorCode
+errorMessage
+result
+
+Event:
+eventId
+timestamp
+type
+payload
+
+Команды, которые должны существовать в НАШЕМ fork, если upstream их не предоставляет:
+anchor(outputId, zoneId?)
+unanchor(outputId)
+toggleAnchor(outputId)
+setCamera(outputId,x,y,zoom,animation)
+applyWindowTargets(revision)
+setWindowMode(windowId,mode)
+subscribeState()
+
+Не считать названия выше доказательством наличия API upstream: это целевой контракт fork.
+
+======================================================================
+3. СОБЫТИЯ IPC
+======================================================================
+
+OutputAdded
+OutputRemoved
+OutputChanged
+CameraChanged
+AnchorModeChanged
+WindowAdded
+WindowRemoved
+WindowChanged
+FocusChanged
+FullscreenChanged
+ZoneChanged
+AnimationCompleted
+LockStateChanged
+CompositorError
+
+После reconnect shell-core обязан получить full snapshot и reconciliation, а не продолжать со старым state вслепую.
+
+======================================================================
+4. CONFIG ROOT
+======================================================================
+
+schemaVersion
+theme
+motion
+shell
+outputs
+zones
+windowRules
+notifications
+search
+widgets
+servers
+browser
+lock
+greeter
+hotkeys
+performance
+privacy
+integrations
+diagnostics
+
+Каждый public setting:
+type
+default
+constraints
+scope
+riskLevel
+restartRequirement
+uiMetadata
+
+riskLevel:
+safe
+session
+display
+security
+
+======================================================================
+5. DESIGN TOKENS PIPELINE
+======================================================================
+
+Source of truth:
+themes/default/tokens.json
+
+Generator должен создавать:
+Theme.qml
+CSS variables для Zen
+Rust constants при необходимости
+golden metadata
+
+Запрещены дублирующиеся magic numbers в QML/CSS/Rust.
+
+======================================================================
+6. WINDOW ADMISSION ALGORITHM
+======================================================================
+
+WindowAdded:
+1 metadata snapshot;
+2 best matching rule;
+3 transient check;
+4 fullscreen request check;
+5 determine active output/zone;
+6 Anchored? normal app -> tiled;
+7 FreeCanvas? default -> свободное окно текущего canvas;
+8 restore path if prior session match;
+9 insertion policy;
+10 batch target revision.
+
+Нельзя молча привязывать окно FreeCanvas к последней anchored зоне.
+
+======================================================================
+7. WINDOW RULES
+======================================================================
+
+Match fields:
+appId exact/regex
+xwaylandClass
+titleRegex optional
+role
+transient
+
+Actions:
+mode
+zone
+floatRectPolicy
+alwaysOnTop
+tileInsertion
+focusPolicy
+fullscreenPolicy
+
+Conflict resolution:
+priority -> specificity -> config order.
+
+======================================================================
+8. ZONE SNAP ALGORITHM
+======================================================================
+
+Candidate if:
+screenSpaceDistance < snapThreshold
+AND zoom delta within tolerance.
+
+Default:
+snapThreshold = 0.35 viewport diagonal.
+zoomTolerance ≈12%.
+hysteresis ≈10%.
+
+Score:
+normalizedDistance + zoomPenalty.
+Lowest score wins.
+
+======================================================================
+9. LAYOUT REVISION BATCH
+======================================================================
+
+revisionId
+duration
+easing
+windowTargets[]
+
+Каждый target:
+windowId
+x
+y
+w
+h
+mode
+zHint optional
+
+Compositor принимает revision целиком или возвращает failure. shell-core хранит последнюю accepted revision.
+
+======================================================================
+10. SAFE AREA OWNERSHIP
+======================================================================
+
+Только shell-core рассчитывает Safe Area.
+UI задаёт desired panel states.
+Compositor даёт output logical geometry.
+Layout engine получает готовую Safe Area.
+
+Это исключает двойное вычитание Dock/RightPanel.
+
+======================================================================
+11. PANEL TRANSITIONS
+======================================================================
+
+States:
+Hidden
+Showing
+Visible
+Hiding
+
+Reverse разрешён из Showing/Hiding.
+Hidden -> input region empty.
+Visible -> normal input.
+
+Reserve-mode и visual animation должны координироваться одной transaction/revision.
+
+======================================================================
+12. FOCUS MODE SNAPSHOT
+======================================================================
+
+При входе snapshot:
+right state
+dock state
+top module visibility
+DND
+reserve policies
+
+Exit возвращает snapshot.
+Если пользователь вручную менял panel внутри Focus, поведение configurable. Default: строгий restore snapshot.
+
+======================================================================
+13. NOTIFICATION CONTRACT
+======================================================================
+
+Проверить поддержку:
+replaces_id
+actions
+expire_timeout
+urgency
+icon
+progress
+sanitized markup
+history
+DND
+multi-monitor placement
+lock privacy
+quick-reply capability
+
+Action не показывается, если выполнить её невозможно.
+
+======================================================================
+14. SEARCH CONTRACT
+======================================================================
+
+Local first-results target <50 ms после debounce на обычной системе.
+Debounce 30–60 ms.
+Network/plugin providers async.
+Search UI не ждёт remote provider.
+
+Esc должен немедленно возвращать keyboard focus предыдущему окну, даже если визуальный close transition ещё заканчивается.
+
+======================================================================
+15. METRICS UPDATE POLICY
+======================================================================
+
+CPU 1s.
+Network 1s.
+Memory 2s.
+Disk capacity 10s.
+Temperatures 5s.
+Server checks 10–60s.
+
+Graph ring buffer finite: 32–120 samples.
+Hidden widget pause/downsample.
+
+======================================================================
+16. LOCK SECURITY ACCEPTANCE
+======================================================================
+
+Тесты:
+- shell-ui kill while locked;
+- shell-core kill while locked;
+- lock process failure behaviour;
+- wrong password;
+- empty password;
+- rapid Enter;
+- keyboard layout;
+- multi-monitor;
+- output hotplug;
+- suspend/resume locked.
+
+Password:
+не persist;
+не log;
+clear after attempt;
+не отправлять в ordinary UI config IPC.
+
+======================================================================
+17. GREETER ACCEPTANCE
+======================================================================
+
+Single session -> session selector hidden.
+Multiple -> shown.
+Wrong password -> thin ERROR feedback, no huge alert.
+Password gets initial focus.
+Power actions via proper session/polkit backend.
+
+======================================================================
+18. ZEN ACCEPTANCE
+======================================================================
+
+Browser usable without custom CSS.
+Incompatible Zen update -> theme can disable itself safely.
+Extension absent -> reply hidden.
+Native host disconnected -> reply becomes unavailable without broken button.
+Profile/theme backup+rollback verified.
+
+======================================================================
+19. MULTI-MONITOR CASES
+======================================================================
+
+Active output unplug while anchored:
+- select fallback;
+- keep all windows reachable;
+- update viewport mapping;
+- restore zone only after topology settle.
+
+Scale change:
+recompute logical geometry, preserve ratios.
+
+Mixed 60/144 Hz:
+motion time-based.
+
+Primary change:
+UI follows policy, not hard-coded output index.
+
+======================================================================
+20. PERFORMANCE TESTS
+======================================================================
+
+Idle 10 min -> no unbounded memory growth.
+Panel 1000 show/hide -> no leaked QML objects.
+500 zone switches -> no camera/layout drift.
+Notification storm -> no UI freeze/history unbounded growth.
+Offline servers -> async timeout, no blocked event loop.
+
+======================================================================
+21. GOLDEN STATE IDS
+======================================================================
+
+G01 desktop_base
+G02 desktop_right_hidden
+G03 desktop_dock_hidden
+G04 desktop_focus
+G05 browser_telegram_grafana
+G06 browser_archwiki_github
+G07 browser_newtab
+G08 settings_main
+G09 notification_toast_reply
+G10 notification_center
+G11 lock_idle
+G12 lock_password
+G13 login_single_session
+G14 login_multi_session
+G15 login_error
+G16 search_open
+G17 free_canvas
+G18 design_mode
+
+Для каждого:
+viewport
+scale
+theme version
+font version
+mock-data version
+PNG
+geometry JSON
+perceptual mask
+
+======================================================================
+22. ФУНКЦИОНАЛЬНЫЕ SCENARIOS
+======================================================================
+
+A. Login -> Zone1 -> editor -> terminal -> tiling -> hide RightPanel -> windows expand -> show -> windows shrink.
+
+B. Zone1 Anchored -> toggle Free -> pan -> toggle Anchor -> no nearby zone -> create new zone -> browser opens tiled there.
+
+C. Zone1 -> Zone3 -> during camera animation Zone2 -> final state exactly Zone2, no stuck lock.
+
+D. Focus -> noncritical notification -> no popup, history stores -> exit Focus -> previous UI restored.
+
+E. Supported browser adapter -> toast -> inline reply -> send -> no duplicate notification.
+
+F. Second monitor disconnect -> every window remains reachable.
+
+G. Invalid settings candidate -> rejected before commit -> current config unchanged.
+
+H. shell-ui crash -> systemd restart -> driftwm and application windows continue.
+
+======================================================================
+23. VISUAL ACCEPTANCE
+======================================================================
+
+Reference viewport 1672×941.
+Critical geometry ±2 px.
+Radius ±1 px.
+Border 1 logical px.
+Semantic colors exact token values.
+Controlled animation duration ±5 ms.
+
+Fail conditions:
+- blue/yellow/purple own-shell accent;
+- green focus border;
+- system landscape wallpaper;
+- lock/login instructions;
+- RightPanel pixel remains visible when hidden;
+- Dock pixel remains visible when hidden;
+- own-shell production string unexpectedly English.
+
+======================================================================
+24. DIAGNOSTIC ERROR CODES
+======================================================================
+
+CFG_SCHEMA_INVALID
+CFG_SEMANTIC_INVALID
+CFG_MIGRATION_FAILED
+IPC_DISCONNECTED
+IPC_PROTOCOL_MISMATCH
+LAYOUT_MIN_SIZE_CONFLICT
+ZONE_SNAP_AMBIGUOUS
+OUTPUT_PROFILE_MISSING
+WIDGET_BACKEND_UNAVAILABLE
+BROWSER_HOST_DISCONNECTED
+AUTH_HELPER_UNAVAILABLE
+THEME_ZEN_INCOMPATIBLE
+
+User UI — короткое русское сообщение.
+Diagnostics — полный code/context без secrets.
+
+======================================================================
+25. RELEASE CHECKLIST
+======================================================================
+
+[ ] Все shell strings русские.
+[ ] Settings search находит каждый public property.
+[ ] Нет GUI controls без backend effect.
+[ ] Нет public backend property без GUI, кроме internal-only.
+[ ] Hotkey conflicts выявляются.
+[ ] RightPanel offscreen hidden.
+[ ] Dock offscreen hidden.
+[ ] Focus snapshot корректен.
+[ ] Anchored блокирует pan/zoom.
+[ ] FreeCanvas разрешает pan/zoom.
+[ ] New zone не захватывает окна без policy.
+[ ] Transients не ломают tiling.
+[ ] Fullscreen restore корректен.
+[ ] Multi-monitor не теряет окна.
+[ ] Lock security tests проходят.
+[ ] Greeter auth tests проходят.
+[ ] Secrets redacted.
+[ ] Safe mode доступен.
+[ ] Config rollback проверен.
+[ ] Golden tests проходят.
+[ ] Performance budgets проверены.
+[ ] Zen rollback проверен.
+[ ] Quick reply capability-driven.
+[ ] Palette соответствует ТЗ.

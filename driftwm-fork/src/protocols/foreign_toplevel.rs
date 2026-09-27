@@ -1,0 +1,528 @@
+//! `zwlr-foreign-toplevel-management-v1` (wlr) implementation, with companion
+//! plumbing that mirrors each window into `ext-foreign-toplevel-list-v1`.
+//!
+//! Both protocols are kept alive: ext-* is enumerate-only and is what
+//! ext-image-copy-capture pairs with for per-window screencast; wlr- carries
+//! the `activate`/`close`/`set_fullscreen` requests that taskbars and docks
+//! still rely on.
+
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+use crate::stage::{Stage, StageElement};
+use crate::window_ext::WindowExt;
+use smithay::output::Output;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::reexports::wayland_protocols_wlr;
+use smithay::reexports::wayland_server::backend::ClientId;
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::{
+    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState};
+use smithay::wayland::seat::WaylandFocus;
+use wayland_protocols_wlr::foreign_toplevel::v1::server::{
+    zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
+};
+use zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1;
+use zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
+
+const VERSION: u32 = 3;
+
+pub struct ForeignToplevelManagerState {
+    display: DisplayHandle,
+    instances: Vec<ZwlrForeignToplevelManagerV1>,
+    toplevels: HashMap<WlSurface, ToplevelData>,
+}
+
+pub trait ForeignToplevelHandler {
+    fn foreign_toplevel_manager_state(&mut self) -> &mut ForeignToplevelManagerState;
+    fn foreign_toplevel_outputs(&self) -> Vec<Output>;
+    fn activate(&mut self, wl_surface: WlSurface);
+    fn close(&mut self, wl_surface: WlSurface);
+    fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>);
+    fn unset_fullscreen(&mut self, wl_surface: WlSurface);
+    fn set_maximized(&mut self, wl_surface: WlSurface);
+    fn unset_maximized(&mut self, wl_surface: WlSurface);
+}
+
+struct ToplevelData {
+    title: Option<String>,
+    app_id: Option<String>,
+    states: Vec<u32>,
+    /// All WlOutputs we've sent output_enter for, per handle instance.
+    instances: HashMap<ZwlrForeignToplevelHandleV1, Vec<WlOutput>>,
+    /// ext-foreign-toplevel-list-v1 mirror handle. The corresponding
+    /// `WlSurface` is stashed in its user_data so capture sources can recover
+    /// it from a `ForeignToplevelHandle`.
+    ext_handle: ForeignToplevelHandle,
+}
+
+pub struct ForeignToplevelGlobalData {
+    filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
+}
+
+impl ForeignToplevelManagerState {
+    pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
+    where
+        D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
+        D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
+        D: 'static,
+        F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
+    {
+        let global_data = ForeignToplevelGlobalData {
+            filter: Box::new(filter),
+        };
+        display.create_global::<D, ZwlrForeignToplevelManagerV1, _>(VERSION, global_data);
+        Self {
+            display: display.clone(),
+            instances: Vec::new(),
+            toplevels: HashMap::new(),
+        }
+    }
+}
+
+/// Sync foreign-toplevel state with the current window list.
+/// Call once per frame (not per-output) — windows on the infinite canvas
+/// appear on all outputs, so there's no per-output tracking.
+///
+/// Drives both wlr- and ext-foreign-toplevel-list in lockstep.
+/// Generic over D (the compositor state type) for `create_resource` dispatch
+/// and over the stage element type; surfaceless elements are skipped by the
+/// `wl_surface()` guards.
+pub fn refresh<D, W>(
+    ft_state: &mut ForeignToplevelManagerState,
+    ext_state: &mut ForeignToplevelListState,
+    stage: &Stage<W>,
+    focused_surface: Option<&WlSurface>,
+    outputs: &[Output],
+) where
+    W: StageElement + WaylandFocus,
+    D: Dispatch<ZwlrForeignToplevelHandleV1, ()> + 'static,
+    D: Dispatch<
+            smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            ForeignToplevelHandle,
+        > + 'static,
+    D: smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler,
+{
+    // 1. Remove closed or widget windows
+    ft_state.toplevels.retain(|surface, data| {
+        let alive = stage.windows().any(|w| {
+            w.wl_surface().as_deref() == Some(surface)
+                && !crate::config::applied_rule(surface).is_some_and(|r| r.widget)
+        });
+        if !alive {
+            for instance in data.instances.keys() {
+                instance.closed();
+            }
+            data.ext_handle.send_closed();
+        }
+        alive
+    });
+
+    // 2. Refresh non-focused windows first (deactivate-before-activate ordering)
+    let mut focused_entry = None;
+    for window in stage.windows() {
+        let Some(wl_surface) = window.wl_surface() else {
+            continue;
+        };
+        if crate::config::applied_rule(&wl_surface).is_some_and(|r| r.widget) {
+            continue;
+        }
+        let wl_surface = wl_surface.into_owned();
+        let is_focused = focused_surface.is_some_and(|fs| fs == &wl_surface);
+        if is_focused {
+            focused_entry = Some(window.clone());
+            continue;
+        }
+        refresh_toplevel::<D, _>(ft_state, ext_state, window, &wl_surface, outputs, false);
+    }
+
+    // 3. Refresh focused window last (with Activated state)
+    if let Some(window) = focused_entry {
+        let Some(wl_surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            return;
+        };
+        refresh_toplevel::<D, _>(ft_state, ext_state, &window, &wl_surface, outputs, true);
+    }
+}
+
+/// Recover the `WlSurface` for a foreign toplevel handle, if the window
+/// represented by `handle` is still alive in the toplevel map.
+pub fn surface_for_ext_handle(handle: &ForeignToplevelHandle) -> Option<WlSurface> {
+    handle.user_data().get::<WlSurface>().cloned()
+}
+
+/// Send output_enter for a newly connected output to all existing toplevels.
+pub fn send_output_enter_all(ft_state: &mut ForeignToplevelManagerState, output: &Output) {
+    for data in ft_state.toplevels.values_mut() {
+        for (instance, outputs) in &mut data.instances {
+            if let Some(client) = instance.client() {
+                for wl_output in output.client_outputs(&client) {
+                    if !outputs.iter().any(|o| o == &wl_output) {
+                        instance.output_enter(&wl_output);
+                        outputs.push(wl_output);
+                    }
+                }
+                instance.done();
+            }
+        }
+    }
+}
+
+/// Send output_leave for a disconnected output to all existing toplevels.
+pub fn send_output_leave_all(ft_state: &mut ForeignToplevelManagerState, output: &Output) {
+    for data in ft_state.toplevels.values_mut() {
+        for (instance, outputs) in &mut data.instances {
+            if let Some(client) = instance.client() {
+                let client_outputs: Vec<_> = output.client_outputs(&client).collect();
+                outputs.retain(|wl_output| {
+                    if client_outputs.iter().any(|o| o == wl_output) {
+                        instance.output_leave(wl_output);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if !client_outputs.is_empty() {
+                    instance.done();
+                }
+            }
+        }
+    }
+}
+
+fn refresh_toplevel<D, W: WindowExt>(
+    protocol_state: &mut ForeignToplevelManagerState,
+    ext_state: &mut ForeignToplevelListState,
+    window: &W,
+    wl_surface: &WlSurface,
+    outputs: &[Output],
+    has_focus: bool,
+) where
+    D: Dispatch<ZwlrForeignToplevelHandleV1, ()> + 'static,
+    D: Dispatch<
+            smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            ForeignToplevelHandle,
+        > + 'static,
+    D: smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler,
+{
+    // Read title/app_id via WindowExt
+    let title = window.window_title();
+    let app_id = window.app_id_or_class();
+    let xdg_states = with_states(wl_surface, |states| {
+        states
+            .cached_state
+            .get::<smithay::wayland::shell::xdg::ToplevelCachedState>()
+            .current()
+            .last_acked
+            .as_ref()
+            .map(|c| c.state.states.clone())
+            .unwrap_or_default()
+    });
+
+    let states = to_state_vec(&xdg_states, has_focus);
+
+    match protocol_state.toplevels.entry(wl_surface.clone()) {
+        Entry::Occupied(entry) => {
+            let data = entry.into_mut();
+
+            let mut new_title = None;
+            if data.title != title {
+                data.title.clone_from(&title);
+                new_title = title.as_deref();
+            }
+
+            let mut new_app_id = None;
+            if data.app_id != app_id {
+                data.app_id.clone_from(&app_id);
+                new_app_id = app_id.as_deref();
+            }
+
+            let mut states_changed = false;
+            if data.states != states {
+                data.states = states;
+                states_changed = true;
+            }
+
+            let something_changed = new_title.is_some() || new_app_id.is_some() || states_changed;
+
+            if something_changed {
+                for instance in data.instances.keys() {
+                    if let Some(new_title) = new_title {
+                        instance.title(new_title.to_owned());
+                    }
+                    if let Some(new_app_id) = new_app_id {
+                        instance.app_id(new_app_id.to_owned());
+                    }
+                    if states_changed {
+                        instance.state(data.states.iter().flat_map(|x| x.to_ne_bytes()).collect());
+                    }
+                    instance.done();
+                }
+
+                // Mirror to ext handle. The ext protocol carries no state bits,
+                // only title/app_id, so changes there are gated separately.
+                let mut ext_changed = false;
+                if let Some(t) = new_title {
+                    data.ext_handle.send_title(t);
+                    ext_changed = true;
+                }
+                if let Some(a) = new_app_id {
+                    data.ext_handle.send_app_id(a);
+                    ext_changed = true;
+                }
+                if ext_changed {
+                    data.ext_handle.send_done();
+                }
+            }
+
+            // Clean dead wl_outputs
+            for wl_outputs in data.instances.values_mut() {
+                wl_outputs.retain(|x| x.is_alive());
+            }
+        }
+        Entry::Vacant(entry) => {
+            // New window — send output_enter for ALL outputs
+            let ext_handle = ext_state.new_toplevel::<D>(
+                title.clone().unwrap_or_default(),
+                app_id.clone().unwrap_or_default(),
+            );
+            // Stash the WlSurface so capture sources created later can recover it.
+            ext_handle
+                .user_data()
+                .insert_if_missing(|| wl_surface.clone());
+
+            let mut data = ToplevelData {
+                title,
+                app_id,
+                states,
+                instances: HashMap::new(),
+                ext_handle,
+            };
+
+            for manager in &protocol_state.instances {
+                if let Some(client) = manager.client() {
+                    data.add_instance::<D>(&protocol_state.display, &client, manager, outputs);
+                }
+            }
+
+            entry.insert(data);
+        }
+    }
+}
+
+impl ToplevelData {
+    fn add_instance<D>(
+        &mut self,
+        handle: &DisplayHandle,
+        client: &Client,
+        manager: &ZwlrForeignToplevelManagerV1,
+        all_outputs: &[Output],
+    ) where
+        D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
+        D: 'static,
+    {
+        let toplevel = client
+            .create_resource::<ZwlrForeignToplevelHandleV1, _, D>(handle, manager.version(), ())
+            .unwrap();
+        manager.toplevel(&toplevel);
+
+        if let Some(title) = &self.title {
+            toplevel.title(title.clone());
+        }
+        if let Some(app_id) = &self.app_id {
+            toplevel.app_id(app_id.clone());
+        }
+
+        toplevel.state(self.states.iter().flat_map(|x| x.to_ne_bytes()).collect());
+
+        // Canvas windows appear on all outputs
+        let mut wl_outputs = Vec::new();
+        for output in all_outputs {
+            for wl_output in output.client_outputs(client) {
+                toplevel.output_enter(&wl_output);
+                wl_outputs.push(wl_output);
+            }
+        }
+
+        toplevel.done();
+        self.instances.insert(toplevel, wl_outputs);
+    }
+}
+
+impl<D> GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData, D>
+    for ForeignToplevelManagerState
+where
+    D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
+    D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
+    D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
+    D: ForeignToplevelHandler,
+{
+    fn bind(
+        state: &mut D,
+        handle: &DisplayHandle,
+        client: &Client,
+        resource: New<ZwlrForeignToplevelManagerV1>,
+        _global_data: &ForeignToplevelGlobalData,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        let manager = data_init.init(resource, ());
+
+        let outputs = state.foreign_toplevel_outputs();
+        let ft_state = state.foreign_toplevel_manager_state();
+
+        for data in ft_state.toplevels.values_mut() {
+            data.add_instance::<D>(handle, client, &manager, &outputs);
+        }
+
+        ft_state.instances.push(manager);
+    }
+
+    fn can_view(client: Client, global_data: &ForeignToplevelGlobalData) -> bool {
+        (global_data.filter)(&client)
+    }
+}
+
+impl<D> Dispatch<ZwlrForeignToplevelManagerV1, (), D> for ForeignToplevelManagerState
+where
+    D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
+    D: ForeignToplevelHandler,
+{
+    fn request(
+        state: &mut D,
+        _client: &Client,
+        resource: &ZwlrForeignToplevelManagerV1,
+        request: <ZwlrForeignToplevelManagerV1 as Resource>::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            zwlr_foreign_toplevel_manager_v1::Request::Stop => {
+                resource.finished();
+                let state = state.foreign_toplevel_manager_state();
+                state.instances.retain(|x| x != resource);
+            }
+            // Forward-compat: a future protocol revision could add new requests.
+            // Ignore rather than panic — a malformed or future-versioned client
+            // mustn't be able to take the compositor down.
+            other => tracing::debug!(
+                "zwlr_foreign_toplevel_manager_v1: ignoring unknown request {other:?}"
+            ),
+        }
+    }
+
+    fn destroyed(
+        state: &mut D,
+        _client: ClientId,
+        resource: &ZwlrForeignToplevelManagerV1,
+        _data: &(),
+    ) {
+        let state = state.foreign_toplevel_manager_state();
+        state.instances.retain(|x| x != resource);
+    }
+}
+
+impl<D> Dispatch<ZwlrForeignToplevelHandleV1, (), D> for ForeignToplevelManagerState
+where
+    D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
+    D: ForeignToplevelHandler,
+{
+    fn request(
+        state: &mut D,
+        _client: &Client,
+        resource: &ZwlrForeignToplevelHandleV1,
+        request: <ZwlrForeignToplevelHandleV1 as Resource>::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, D>,
+    ) {
+        let protocol_state = state.foreign_toplevel_manager_state();
+
+        let Some((surface, _)) = protocol_state
+            .toplevels
+            .iter()
+            .find(|(_, data)| data.instances.contains_key(resource))
+        else {
+            return;
+        };
+        let surface = surface.clone();
+
+        match request {
+            zwlr_foreign_toplevel_handle_v1::Request::SetMaximized => {
+                state.set_maximized(surface);
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
+                state.unset_maximized(surface);
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized
+            | zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => {
+                // No-op: no minimize concept
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::Activate { .. } => {
+                state.activate(surface);
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::Close => {
+                state.close(surface);
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetRectangle { .. } => {}
+            zwlr_foreign_toplevel_handle_v1::Request::Destroy => {}
+            zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { output } => {
+                state.set_fullscreen(surface, output);
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetFullscreen => {
+                state.unset_fullscreen(surface);
+            }
+            other => tracing::debug!(
+                "zwlr_foreign_toplevel_handle_v1: ignoring unknown request {other:?}"
+            ),
+        }
+    }
+
+    fn destroyed(
+        state: &mut D,
+        _client: ClientId,
+        resource: &ZwlrForeignToplevelHandleV1,
+        _data: &(),
+    ) {
+        let state = state.foreign_toplevel_manager_state();
+        for data in state.toplevels.values_mut() {
+            data.instances.retain(|instance, _| instance != resource);
+        }
+    }
+}
+
+fn to_state_vec(
+    states: &smithay::wayland::shell::xdg::ToplevelStateSet,
+    has_focus: bool,
+) -> Vec<u32> {
+    let mut rv = Vec::with_capacity(3);
+    if states.contains(xdg_toplevel::State::Maximized) {
+        rv.push(zwlr_foreign_toplevel_handle_v1::State::Maximized as u32);
+    }
+    if states.contains(xdg_toplevel::State::Fullscreen) {
+        rv.push(zwlr_foreign_toplevel_handle_v1::State::Fullscreen as u32);
+    }
+    if has_focus {
+        rv.push(zwlr_foreign_toplevel_handle_v1::State::Activated as u32);
+    }
+    rv
+}
+
+#[macro_export]
+macro_rules! delegate_foreign_toplevel {
+    ($(@<$( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+>)? $ty: ty) => {
+        smithay::reexports::wayland_server::delegate_global_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1: $crate::protocols::foreign_toplevel::ForeignToplevelGlobalData
+        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
+        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1: ()
+        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
+        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1: ()
+        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
+    };
+}

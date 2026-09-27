@@ -1,0 +1,412 @@
+use std::time::Duration;
+
+use smithay::backend::renderer::element::RenderElementStates;
+use smithay::desktop::layer_map_for_output;
+use smithay::input::pointer::CursorImageStatus;
+use smithay::output::Output;
+use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
+
+use driftwm::canvas;
+
+/// Frame-callback heartbeat for off-screen toplevels: at most one callback per
+/// this interval, vs. full render rate on-screen. Sending zero callbacks
+/// off-screen starves the client's buffer cycle, disconnecting native Wayland
+/// clients (EGL swap starvation) and stalling Xwayland ones (#141). 995ms (not a
+/// round 1s) matches niri so a per-second client still gets one.
+///
+/// Must stay strictly shorter than the 1s fallback timer in `main.rs`, for the
+/// same `elapsed > throttle` reason — a round 1000ms would make every timer
+/// tick miss. udev-only: winit re-arms at 16ms.
+const FRAME_CALLBACK_THROTTLE: Duration = Duration::from_millis(995);
+
+/// Sync foreign-toplevel protocol state with the current window list.
+/// Call once per frame iteration (not per-output).
+pub fn refresh_foreign_toplevels(state: &mut crate::state::DriftWm) {
+    let keyboard = state.seat.get_keyboard().unwrap();
+    let focused = keyboard.current_focus().map(|f| f.0);
+    // Skip virtual placeholders for disconnected monitors — their wl_output
+    // global is gone, so advertising them to new toplevels would reference a
+    // proxy clients have already destroyed.
+    let outputs: Vec<Output> = state
+        .space
+        .outputs()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
+    driftwm::protocols::foreign_toplevel::refresh::<crate::state::DriftWm, _>(
+        &mut state.foreign_toplevel_state,
+        &mut state.foreign_toplevel_list_state,
+        &state.stage,
+        focused.as_ref(),
+        &outputs,
+    );
+}
+
+/// Recompute each output's active bookmark and sync the ext-workspace protocol.
+/// Call once per frame alongside `refresh_foreign_toplevels`. Incumbents live
+/// per-output in `OutputState`; the focused output's is what the protocol's
+/// single `active` bit and the IPC `active_bookmark` fields report.
+pub fn refresh_ext_workspaces(state: &mut crate::state::DriftWm) {
+    use crate::state::{output_logical_size, output_state};
+
+    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+    for output in &outputs {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        let viewport = output_logical_size(output);
+        let usable_center = state.usable_center_screen_on(output);
+        let incumbent = output_state(output).active_bookmark.clone();
+        let winner = canvas::active_bookmark(
+            &state.bookmarks,
+            camera,
+            viewport,
+            zoom,
+            usable_center,
+            incumbent.as_deref(),
+        );
+        if winner != incumbent {
+            output_state(output).active_bookmark = winner;
+            state.active_bookmark_dirty = true;
+        }
+    }
+
+    let active = state
+        .active_output()
+        .and_then(|o| output_state(&o).active_bookmark.clone());
+    // Only outputs with a live wl_output global can carry group enters; the
+    // virtual placeholders left by a full disconnect have none.
+    let live_outputs: Vec<Output> = outputs
+        .iter()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
+    driftwm::protocols::ext_workspace::refresh::<crate::state::DriftWm>(
+        &mut state.ext_workspace_state,
+        &state.bookmarks,
+        active.as_deref(),
+        &live_outputs,
+    );
+}
+
+/// Frame-callback primary-scanout filter, gating callback rate by visibility.
+/// Returning `None` for off-screen surfaces makes smithay fall through to its
+/// `FRAME_CALLBACK_THROTTLE`-gated `frame_overdue` path (the heartbeat rate)
+/// instead of the full render rate.
+fn frame_callback_filter<'a>(
+    output: &'a Output,
+    on_screen: bool,
+) -> impl FnMut(
+    &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    &smithay::wayland::compositor::SurfaceData,
+) -> Option<Output>
++ Copy
++ 'a {
+    move |_surface, _states| {
+        if on_screen {
+            Some(output.clone())
+        } else {
+            None
+        }
+    }
+}
+
+/// Update each visible surface's primary-scanout-output to `output`. Smithay
+/// uses this to decide where to deliver presentation feedback. Must be called
+/// after `compositor.render_frame()` so we have render-element states.
+pub fn update_primary_scanout_output(
+    state: &crate::state::DriftWm,
+    output: &Output,
+    states: &RenderElementStates,
+) {
+    use smithay::desktop::utils::update_surface_primary_scanout_output;
+    use smithay::wayland::compositor::TraversalAction;
+    use smithay::wayland::compositor::with_surface_tree_downward;
+
+    for window in state.stage.windows().filter_map(|w| w.client()) {
+        window.with_surfaces(|surface, surface_data| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                surface_data,
+                None,
+                states,
+                smithay::backend::renderer::element::default_primary_scanout_output_compare,
+            );
+        });
+    }
+
+    let layer_map = layer_map_for_output(output);
+    for layer_surface in layer_map.layers() {
+        layer_surface.with_surfaces(|surface, surface_data| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                surface_data,
+                None,
+                states,
+                smithay::backend::renderer::element::default_primary_scanout_output_compare,
+            );
+        });
+    }
+    drop(layer_map);
+
+    for cl in &state.canvas_layers {
+        with_surface_tree_downward(
+            cl.surface.wl_surface(),
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, surface_data, _| {
+                update_surface_primary_scanout_output(
+                    surface,
+                    output,
+                    surface_data,
+                    None,
+                    states,
+                    smithay::backend::renderer::element::default_primary_scanout_output_compare,
+                );
+            },
+            |_, _, _| true,
+        );
+    }
+
+    if let Some(lock_surface) = state.lock_surfaces.get(output) {
+        with_surface_tree_downward(
+            lock_surface.wl_surface(),
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, surface_data, _| {
+                update_surface_primary_scanout_output(
+                    surface,
+                    output,
+                    surface_data,
+                    None,
+                    states,
+                    smithay::backend::renderer::element::default_primary_scanout_output_compare,
+                );
+            },
+            |_, _, _| true,
+        );
+    }
+}
+
+/// Collect presentation-feedback callbacks from all surfaces visible on `output`.
+/// Hand the result to `compositor.queue_frame()` and let `frame_submitted()`
+/// return it to be consumed by `presented()` on VBlank.
+pub fn take_presentation_feedback(
+    state: &crate::state::DriftWm,
+    output: &Output,
+    states: &RenderElementStates,
+) -> smithay::desktop::utils::OutputPresentationFeedback {
+    use smithay::desktop::utils::{
+        OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
+        surface_primary_scanout_output, take_presentation_feedback_surface_tree,
+    };
+
+    let mut feedback = OutputPresentationFeedback::new(output);
+
+    for window in state.stage.windows().filter_map(|w| w.client()) {
+        window.take_presentation_feedback(
+            &mut feedback,
+            surface_primary_scanout_output,
+            |surface, _| surface_presentation_feedback_flags_from_states(surface, None, states),
+        );
+    }
+
+    let layer_map = layer_map_for_output(output);
+    for layer_surface in layer_map.layers() {
+        layer_surface.take_presentation_feedback(
+            &mut feedback,
+            surface_primary_scanout_output,
+            |surface, _| surface_presentation_feedback_flags_from_states(surface, None, states),
+        );
+    }
+    drop(layer_map);
+
+    for cl in &state.canvas_layers {
+        take_presentation_feedback_surface_tree(
+            cl.surface.wl_surface(),
+            &mut feedback,
+            surface_primary_scanout_output,
+            |surface, _| surface_presentation_feedback_flags_from_states(surface, None, states),
+        );
+    }
+
+    if let Some(lock_surface) = state.lock_surfaces.get(output) {
+        take_presentation_feedback_surface_tree(
+            lock_surface.wl_surface(),
+            &mut feedback,
+            surface_primary_scanout_output,
+            |surface, _| surface_presentation_feedback_flags_from_states(surface, None, states),
+        );
+    }
+
+    feedback
+}
+
+/// Post-render: frame callbacks, space cleanup.
+pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
+    let time = state.start_time.elapsed();
+
+    // On-screen windows get callbacks at render rate; off-screen ones get the
+    // FRAME_CALLBACK_THROTTLE heartbeat (see frame_callback_filter).
+    let (camera, zoom) = {
+        let os = crate::state::output_state(output);
+        (os.camera, os.zoom)
+    };
+    let viewport_size = crate::state::output_logical_size(output);
+    let visible_rect = canvas::visible_canvas_rect(camera.to_i32_round(), viewport_size, zoom);
+
+    for window in state.stage.windows().filter_map(|w| w.client()) {
+        let Some(loc) = state.stage.position_of(window) else {
+            continue;
+        };
+        let geom_loc = window.geometry().loc;
+        let mut bbox = window.bbox_with_popups();
+        bbox.loc += loc - geom_loc;
+        let on_screen = visible_rect.overlaps(bbox);
+
+        window.send_frame(
+            output,
+            time,
+            Some(FRAME_CALLBACK_THROTTLE),
+            frame_callback_filter(output, on_screen),
+        );
+    }
+
+    // Mirrors the renderer's own cull (nothing draws under a lock frame; only
+    // Overlay survives a fullscreen output) so `drawn => callback` holds.
+    // Recomputed rather than threaded from `compose_frame`: the only unsafe
+    // direction is compose drawing while this culls, and nothing between the two
+    // calls moves a predicate that way. Lock state only advances its confirmation
+    // bookkeeping, staying `Locked`. The fullscreen half reads the output's
+    // camera and zoom, the window's stage position, and the centring offset its
+    // fullscreen entry holds — and everything either backend runs between the two
+    // calls is submit-and-bookkeeping work — scanout, presentation feedback,
+    // capture, protocol refreshes, persistence — none of which writes any of them
+    // (the centring is written from a client commit, which cannot land here).
+    // That property is the check to re-run when adding a call here, not this
+    // list.
+    //
+    // Scoped to its own block: `layer_map_for_output` below re-locks the same
+    // mutex, so holding this one open would deadlock.
+    {
+        let lock_frame = state.session_lock.renders_lock_frame();
+        let output_fullscreen = state.is_output_visually_fullscreen(output);
+        let layer_map = layer_map_for_output(output);
+        for layer_surface in layer_map.layers() {
+            let on_screen =
+                !lock_frame && (!output_fullscreen || layer_surface.layer() == WlrLayer::Overlay);
+            layer_surface.send_frame(
+                output,
+                time,
+                Some(FRAME_CALLBACK_THROTTLE),
+                frame_callback_filter(output, on_screen),
+            );
+        }
+    }
+
+    // Canvas-positioned widgets pan with the viewport, so throttle them
+    // off-screen like toplevels (unlike the screen-fixed layer surfaces above).
+    for cl in &state.canvas_layers {
+        let on_screen = cl.position.is_none_or(|pos| {
+            let sb = cl.surface.bbox_with_popups();
+            let bbox = smithay::utils::Rectangle::new(
+                (pos.x + sb.loc.x, pos.y + sb.loc.y).into(),
+                sb.size,
+            );
+            visible_rect.overlaps(bbox)
+        });
+        cl.surface.send_frame(
+            output,
+            time,
+            Some(FRAME_CALLBACK_THROTTLE),
+            frame_callback_filter(output, on_screen),
+        );
+    }
+
+    // Cursor surface frame callbacks (animated cursors need these to advance)
+    if let CursorImageStatus::Surface(ref surface) = state.cursor.cursor_status {
+        smithay::desktop::utils::send_frames_surface_tree(
+            surface,
+            output,
+            time,
+            Some(Duration::ZERO),
+            frame_callback_filter(output, true),
+        );
+    }
+
+    // Lock surface frame callback
+    if let Some(lock_surface) = state.lock_surfaces.get(output) {
+        smithay::desktop::utils::send_frames_surface_tree(
+            lock_surface.wl_surface(),
+            output,
+            time,
+            Some(Duration::ZERO),
+            frame_callback_filter(output, true),
+        );
+    }
+
+    // Cleanup
+    state.stage.retain_alive();
+    state.refresh_window_outputs();
+    state.popups.cleanup();
+    layer_map_for_output(output).cleanup();
+    #[cfg(debug_assertions)]
+    state.verify_stage_invariants();
+
+    state.refresh_idle_inhibit();
+}
+
+/// Idle-safety net for the off-screen heartbeat (#141): `post_render` only runs
+/// when an output renders, so an idle compositor would never service a
+/// mapped-but-off-screen surface. Shares FRAME_CALLBACK_THROTTLE with
+/// `post_render` so an active render loop isn't double-serviced.
+///
+/// Covers canvas-positioned surfaces (pan off-viewport) and every output's
+/// layer map: since `post_render` now culls screen-anchored panels too (lock
+/// frame, static fullscreen), a panel needs this to keep getting callbacks once
+/// its whole output goes quiet. Lock surfaces are excluded — `post_render`
+/// doesn't gate them.
+pub fn send_frame_callbacks_fallback(state: &mut crate::state::DriftWm) {
+    let time = state.start_time.elapsed();
+    // Skip the virtual placeholders a full disconnect leaves behind: they have
+    // no DRM surface, so nothing composites and nothing releases the buffers a
+    // serviced client draws into. With every output a placeholder this leaves
+    // no output at all and the heartbeat goes quiet, which is the point.
+    let outputs: Vec<Output> = state
+        .space
+        .outputs()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
+
+    // Skip blanked outputs, matching the udev render loop's own skip: a layer
+    // commit marks its output dirty unconditionally (unlike a window's), so
+    // servicing one here would wake a dark screen every second.
+    for layer_output in outputs
+        .iter()
+        .filter(|o| !state.dpms_off_outputs.contains(o))
+    {
+        let layer_map = layer_map_for_output(layer_output);
+        for layer_surface in layer_map.layers() {
+            layer_surface.send_frame(layer_output, time, Some(FRAME_CALLBACK_THROTTLE), |_, _| {
+                None
+            });
+        }
+    }
+
+    // Output is irrelevant for the rest: the `|_, _| None` filter never reports
+    // a primary scanout, so only the throttle's overdue path can fire.
+    let Some(output) = outputs.first() else {
+        return;
+    };
+    for window in state.stage.windows().filter_map(|w| w.client()) {
+        window.send_frame(output, time, Some(FRAME_CALLBACK_THROTTLE), |_, _| None);
+    }
+    for cl in &state.canvas_layers {
+        cl.surface
+            .send_frame(output, time, Some(FRAME_CALLBACK_THROTTLE), |_, _| None);
+    }
+}

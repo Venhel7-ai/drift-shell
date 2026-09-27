@@ -1,0 +1,39 @@
+test_config_persists_atomically (test_core.CoreTests.test_config_persists_atomically) ... ok
+test_config_rollback_on_compositor_rejection (test_core.CoreTests.test_config_rollback_on_compositor_rejection) ... ok
+test_focus_restores_panels (test_core.CoreTests.test_focus_restores_panels) ... ok
+test_free_canvas_does_not_assign_new_windows (test_core.CoreTests.test_free_canvas_does_not_assign_new_windows) ... ok
+test_fullscreen_remains_zone_member (test_core.CoreTests.test_fullscreen_remains_zone_member) ... ok
+test_invalid_config_never_reaches_compositor (test_core.CoreTests.test_invalid_config_never_reaches_compositor) ... ok
+test_peek_does_not_submit_new_layout (test_core.CoreTests.test_peek_does_not_submit_new_layout) ... ok
+test_pin_submits_layout (test_core.CoreTests.test_pin_submits_layout) ... ok
+test_real_unix_transport_version_validation (test_core.CoreTests.test_real_unix_transport_version_validation) ... skipped 'Unix-сокеты запрещены средой; требуется повторить тест на Arch Linux'
+test_transient_not_tiled (test_core.CoreTests.test_transient_not_tiled) ... ok
+test_atomic_write_preserves_file_on_failed_encoding (test_model.ModelTests.test_atomic_write_preserves_file_on_failed_encoding) ... ok
+test_bad_restore_is_transactional (test_model.ModelTests.test_bad_restore_is_transactional) ... ok
+test_cells_do_not_overlap_except_monocle (test_model.ModelTests.test_cells_do_not_overlap_except_monocle) ... ok
+test_clean_start_is_work (test_model.ModelTests.test_clean_start_is_work) ... ok
+test_dock_overlay_never_changes_safe_area (test_model.ModelTests.test_dock_overlay_never_changes_safe_area) ... ok
+test_duplicate_zone_identity_rejected (test_model.ModelTests.test_duplicate_zone_identity_rejected) ... ok
+test_focus_restores_snapshot (test_model.ModelTests.test_focus_restores_snapshot) ... ok
+test_invalid_config_rejected (test_model.ModelTests.test_invalid_config_rejected) ... ok
+test_layout_cells_stay_in_bounds (test_model.ModelTests.test_layout_cells_stay_in_bounds) ... ok
+test_peek_never_changes_safe_area (test_model.ModelTests.test_peek_never_changes_safe_area) ... ok
+test_pinned_reserves_exactly_once (test_model.ModelTests.test_pinned_reserves_exactly_once) ... ok
+test_profiles_preserve_zone_layout (test_model.ModelTests.test_profiles_preserve_zone_layout) ... ok
+test_restore_drops_session_window_handles (test_model.ModelTests.test_restore_drops_session_window_handles) ... ok
+test_slots_always_include_active (test_model.ModelTests.test_slots_always_include_active) ... ok
+test_small_output_degrades_to_overlay (test_model.ModelTests.test_small_output_degrades_to_overlay) ... ok
+test_snap_uses_screen_space_and_zoom (test_model.ModelTests.test_snap_uses_screen_space_and_zoom) ... ok
+test_unknown_fields_round_trip (test_model.ModelTests.test_unknown_fields_round_trip) ... ok
+test_critical_bypasses_dnd (test_notifications.NotificationTests.test_critical_bypasses_dnd) ... ok
+test_disabled_history_still_has_live_popup (test_notifications.NotificationTests.test_disabled_history_still_has_live_popup) ... ok
+test_dnd_keeps_history_hides_popup (test_notifications.NotificationTests.test_dnd_keeps_history_hides_popup) ... ok
+test_expiry_invalidates_actions (test_notifications.NotificationTests.test_expiry_invalidates_actions) ... ok
+test_history_bounded (test_notifications.NotificationTests.test_history_bounded) ... ok
+test_markup_is_stripped (test_notifications.NotificationTests.test_markup_is_stripped) ... ok
+test_replacement_preserves_id_and_single_history_item (test_notifications.NotificationTests.test_replacement_preserves_id_and_single_history_item) ... ok
+
+----------------------------------------------------------------------
+Ran 34 tests in 0.096s
+
+OK (skipped=1)
