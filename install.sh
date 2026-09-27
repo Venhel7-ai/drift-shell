@@ -13,7 +13,7 @@ Drift Shell 0.1.0-dev — неполная экспериментальная р
 Полное соответствие ТЗ и проверки реального Arch-сеанса НЕ подтверждены.
 Подробности: STATUS-RU.md. Сборка требует интернета, места и Rust >= 1.88.
 MSG
-sudo pacman -Syu --needed base-devel rust python quickshell ttf-inter ttf-jetbrains-mono
+sudo pacman -Syu --needed base-devel rust python quickshell inter-font ttf-jetbrains-mono
 cd -- "$project_dir"
 makepkg --syncdeps --install --cleanbuild
 systemctl --user daemon-reload
